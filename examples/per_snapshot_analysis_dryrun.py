@@ -71,7 +71,7 @@ def main():
     print("or:           cat " + str(pool.pending_dir / "Pt100-snap-001.yaml"))
     print()
     print("when ready to actually run on Alpine, launch a worker against this pool:")
-    print(f"  sbatch <sbatch-wrapper>  # eventually subjob backends/slurm.py auto-generates this")
+    print("  sbatch <sbatch-wrapper>  # eventually subjob backends/slurm.py auto-generates this")
     print(f"  # or for local testing:  python -m subjob.worker --pool {pool.root}")
 
 

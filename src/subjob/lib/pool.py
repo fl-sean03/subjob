@@ -20,9 +20,10 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from subjob.lib.lock import atomic_move
 from subjob.lib.task import Task

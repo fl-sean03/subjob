@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from subjob.backends.slurm import SlurmBackend, _seconds_to_hms
 
 

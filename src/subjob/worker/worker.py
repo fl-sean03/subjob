@@ -25,7 +25,6 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
 
 from subjob.lib.pool import ClaimedTask, Pool
 from subjob.lib.task import Task
@@ -42,7 +41,7 @@ class Capabilities:
     cores: int
     gpus: int = 0
     host: str = ""
-    walltime_end: Optional[float] = None  # epoch seconds, None = unlimited
+    walltime_end: float | None = None  # epoch seconds, None = unlimited
 
     @classmethod
     def from_env(
@@ -61,7 +60,7 @@ class Capabilities:
         return cls(cores=cores, gpus=gpus, host=socket.gethostname(), walltime_end=walltime_end)
 
 
-def _compute_walltime_end(cli_seconds: int | None) -> Optional[float]:
+def _compute_walltime_end(cli_seconds: int | None) -> float | None:
     """Resolve the walltime deadline (epoch seconds) from SLURM env or a CLI flag."""
     env = os.environ
     end_env = env.get("SLURM_JOB_END_TIME")
@@ -109,7 +108,7 @@ class Worker:
         capabilities: Capabilities,
         *,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
-        idle_timeout_s: Optional[float] = None,
+        idle_timeout_s: float | None = None,
         walltime_safety_s: float = DEFAULT_WALLTIME_SAFETY,
     ):
         self.pool = pool

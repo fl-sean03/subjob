@@ -2,9 +2,27 @@
 
 Run many tasks inside one HPC allocation. Designed for agents + humans submitting heterogeneous compute work to SLURM clusters (and eventually cloud).
 
-> **Status:** Phase 0 design phase, 2026-05-25. No code yet.
+> **Status:** Phase 0 MVP shipped 2026-05-26. Pool + worker + CLI + SLURM backend are in place and tested; Phase 1 dogfood begins when the hydrogenation cool+prod fan-out completes.
 >
 > **👉 If you are an agent picking this up, read [START_HERE.md](./START_HERE.md) first.** It is the canonical onboarding doc.
+
+## Quickstart
+
+```bash
+# Install (stdlib-only runtime; pytest + ruff for dev)
+pip install -e .
+
+# Run the end-to-end demo: 5 sleep tasks, one in-process worker, all land in done/
+python examples/sleep_test.py
+
+# Or use the CLI against your own pool:
+python -m subjob.client.cli submit --pool /tmp/mypool --task-file my-task.yaml
+python -m subjob.client.cli status --pool /tmp/mypool
+python -m subjob.worker --pool /tmp/mypool --cores 4 --idle-timeout 5
+python -m subjob.client.cli follow --pool /tmp/mypool --timeout 10
+```
+
+To preview the Phase 1 dogfood workload (60 Pt{100,111,110}-snap-* analysis tasks) without submitting it, run `python examples/per_snapshot_analysis_dryrun.py`.
 
 ## Why this exists
 
