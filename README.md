@@ -2,7 +2,9 @@
 
 Run many tasks inside one HPC allocation. Designed for agents + humans submitting heterogeneous compute work to SLURM clusters (and eventually cloud).
 
-> **Status:** Phase 0 design phase, 2026-05-25. No code yet. See `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md`.
+> **Status:** Phase 0 design phase, 2026-05-25. No code yet.
+>
+> **👉 If you are an agent picking this up, read [START_HERE.md](./START_HERE.md) first.** It is the canonical onboarding doc.
 
 ## Why this exists
 
