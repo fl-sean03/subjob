@@ -337,9 +337,10 @@ def _emit(value, indent, out, is_root=False, after_dash=False):
                 else:
                     out.append(f"{prefix}{k}:")
                     _emit(v, indent, out)  # sequences live at same indent as parent key
-            elif isinstance(v, str) and ("\n" in v or len(v) > 80):
+            elif isinstance(v, str) and "\n" in v:
+                # Multi-line strings use the literal block scalar form.
                 out.append(f"{prefix}{k}: |")
-                for ln in v.splitlines():
+                for ln in v.rstrip("\n").splitlines():
                     out.append(f"{pad}  {ln}")
             else:
                 out.append(f"{prefix}{k}: {_emit_scalar(v)}")
