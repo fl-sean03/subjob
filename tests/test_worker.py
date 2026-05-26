@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+
+from subjob.lib.pool import Pool
+from subjob.lib.task import Resources, Task
+from subjob.worker.runner import run_task
+from subjob.worker.worker import Capabilities, Worker, _parse_timelimit
+
+
+def test_runner_captures_stdout_and_exit_zero(tmp_path):
+    task = Task(id="t1", command="echo hello-stdout")
+    result = run_task(task, tmp_path)
+    assert result.exit_code == 0
+    assert result.succeeded
+    assert "hello-stdout" in result.stdout_tail
+
+
+def test_runner_nonzero_exit(tmp_path):
+    task = Task(id="t1", command="exit 7")
+    result = run_task(task, tmp_path)
+    assert result.exit_code == 7
+    assert not result.succeeded
+
+
+def test_runner_walltime_kill(tmp_path):
+    task = Task(id="t1", command="sleep 10", resources=Resources(walltime_seconds=1))
+    started = time.time()
+    result = run_task(task, tmp_path)
+    elapsed = time.time() - started
+    assert result.walltime_killed
+    assert not result.succeeded
+    assert elapsed < 8
+
+
+def test_worker_completes_all_pending(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    for i in range(5):
+        pool.submit(Task(id=f"t{i}", command="echo done", resources=Resources(cores=1)))
+    worker = Worker(
+        pool,
+        Capabilities(cores=4, host="testhost"),
+        poll_interval=0.05,
+        idle_timeout_s=1.0,
+    )
+    worker.run()
+    assert pool.status() == {"pending": 0, "claimed": 0, "done": 5, "failed": 0}
+
+
+def test_worker_journal_events(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="t1", command="echo hi"))
+    Worker(
+        pool,
+        Capabilities(cores=1, host="testhost"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    types = [e["type"] for e in pool.read_journal()]
+    # Submission, worker lifecycle, and the task lifecycle should all appear.
+    assert "worker_started" in types
+    assert "task_claimed" in types
+    assert "task_started" in types
+    assert "task_done" in types
+    assert "worker_stopped" in types
+
+
+def test_worker_respects_core_capacity(tmp_path):
+    """A 1-core worker should NOT claim a 4-core task."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="big", command="echo big", resources=Resources(cores=4)))
+    pool.submit(Task(id="small", command="echo small", resources=Resources(cores=1)))
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    s = pool.status()
+    assert s["done"] == 1
+    assert s["pending"] == 1
+
+
+def test_worker_walltime_budget_blocks_long_task(tmp_path):
+    """A worker with 2s remaining should not start a 60s task."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="long", command="sleep 60", resources=Resources(walltime_seconds=60)))
+    caps = Capabilities(
+        cores=4,
+        host="t",
+        walltime_end=time.time() + 2.0,  # only 2s of budget
+    )
+    Worker(pool, caps, poll_interval=0.05, idle_timeout_s=0.5, walltime_safety_s=0.5).run()
+    # Task should still be pending — never claimed.
+    assert pool.status()["pending"] == 1
+
+
+def test_parse_slurm_timelimit():
+    assert _parse_timelimit("60") == 60 * 60
+    assert _parse_timelimit("1:30") == 90
+    assert _parse_timelimit("01:02:03") == 3723
+    assert _parse_timelimit("1-00:00:00") == 86400
+
+
+def test_worker_entrypoint_runs(tmp_path):
+    """Smoke-test python -m subjob.worker with a tiny pool."""
+    pool_dir = tmp_path / "p"
+    pool = Pool(pool_dir)
+    pool.init()
+    pool.submit(Task(id="t1", command="echo via-cli"))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "subjob.worker",
+            "--pool",
+            str(pool_dir),
+            "--cores",
+            "1",
+            "--poll-interval",
+            "0.05",
+            "--idle-timeout",
+            "0.5",
+            "--log-level",
+            "WARNING",
+        ],
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert pool.status()["done"] == 1
