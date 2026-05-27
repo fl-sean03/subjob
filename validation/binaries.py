@@ -17,7 +17,11 @@ __future__ section and can be wired up once modules are resolved.
 
 from __future__ import annotations
 
+import sys
+
 from subjob.lib.task import Resources, Task
+
+_PY = sys.executable
 
 NUMPY_SUCCESS = "NUMPY_SVD_DONE"
 SCIPY_SUCCESS = "SCIPY_ODE_DONE"
@@ -30,7 +34,7 @@ FILEIO_SUCCESS = "FILEIO_DONE"
 def numpy_svd(task_id: str, n: int = 1000) -> Task:
     """Singular-value decomposition of an n×n matrix. Tests BLAS/numpy path."""
     cmd = (
-        f"python3 -u -c \""
+        f"{_PY} -u -c \""
         f"import numpy as np, time\n"
         f"t = time.time()\n"
         f"A = np.random.RandomState(42).randn({n}, {n})\n"
@@ -45,7 +49,7 @@ def numpy_svd(task_id: str, n: int = 1000) -> Task:
 def scipy_ode(task_id: str, n_steps: int = 100000) -> Task:
     """Integrate the Lorenz system. Tests scipy stack."""
     cmd = (
-        f"python3 -u -c \""
+        f"{_PY} -u -c \""
         f"from scipy.integrate import solve_ivp\n"
         f"import numpy as np, time\n"
         f"def lorenz(t, y):\n"
@@ -93,7 +97,7 @@ def awk_pipeline(task_id: str, n_lines: int = 200000) -> Task:
 def multiprocessing_fork(task_id: str, n_procs: int = 4) -> Task:
     """Python multiprocessing.Pool — fork + IPC pattern."""
     cmd = (
-        f"python3 -u -c \""
+        f"{_PY} -u -c \""
         f"import multiprocessing as mp, math, time\n"
         f"def work(x):\n"
         f"    return sum(math.sqrt(i) for i in range(x*1000))\n"

@@ -61,8 +61,10 @@ def build_gates() -> list[G.Gate]:
         G.task_attempt_field("exit_137", "exit_code", 137),
         G.task_attempt_field("exit_255", "exit_code", 255),
 
-        # Segfault: shell propagates 128+SIGSEGV(11) = 139
-        G.task_attempt_field("seg", "exit_code", 139),
+        # Segfault: depending on Python version + how shell propagates,
+        # the captured exit_code is either 139 (128+SIGSEGV(11), bash) or
+        # -11 (raw signal). Both indicate the same thing.
+        G.task_attempt_field_in("seg", "exit_code", [139, -11]),
 
         # Walltime ignorers / gracefuls
         G.task_attempt_field("sigterm_ignore", "walltime_killed", True),

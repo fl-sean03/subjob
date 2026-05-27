@@ -81,6 +81,28 @@ def no_double_claims() -> Gate:
 # ----- task-level inspection -----
 
 
+def task_attempt_field_in(task_id: str, key: str, expected_values: list, state: str = "*") -> Gate:
+    """Like task_attempt_field, but passes if value is in any of the listed values."""
+    def gate(pool: Pool) -> GateResult:
+        states = ("done", "failed") if state == "*" else (state,)
+        for st in states:
+            path = pool.root / st / f"{task_id}.yaml"
+            if path.exists():
+                t = Task.read(path)
+                if not t.attempts:
+                    return GateResult(f"attempt_in({task_id},{key})", False, "no attempts")
+                actual = t.attempts[-1].get(key)
+                ok = actual in expected_values
+                return GateResult(
+                    f"attempt_in({task_id},{key})",
+                    ok,
+                    f"expected one of {expected_values}, got {actual!r} (in {st}/)",
+                )
+        return GateResult(f"attempt_in({task_id},{key})", False, f"task not found in {states}")
+
+    return gate
+
+
 def task_attempt_field(task_id: str, key: str, expected: Any, state: str = "*") -> Gate:
     def gate(pool: Pool) -> GateResult:
         states = ("done", "failed") if state == "*" else (state,)

@@ -3,25 +3,35 @@
 Every workload here is shell + standard tools (bash, dd, yes, python3) so
 the suite runs on any cluster without external deps. The point is to
 exercise subjob's runner under varied command shapes, not to model science.
+
+`python3` in task commands resolves via `_PY` to the same interpreter that
+imports this module — so task tasks see the same site-packages the
+submitter has (matters on HPC where system python3 may be Python 3.6).
 """
 
 from __future__ import annotations
 
 import random
+import sys
 
 from subjob.lib.task import Resources, Task
+
+# Use the submitter's interpreter so children see the same site-packages
+# (e.g., scipy installed via pip --user in Python 3.10 isn't visible to
+# Alpine's system /usr/bin/python3 = Python 3.6).
+_PY = sys.executable
 
 
 def cpu_spin(task_id: str, seconds: float = 5.0, walltime_seconds: int | None = None) -> Task:
     """CPU-bound task. Bursts a tight Python loop for `seconds`."""
     wt = walltime_seconds or max(int(seconds * 3) + 5, 10)
     cmd = (
-        "python3 -c \"import time, math\n"
+        f"{_PY} -c \"import time, math\n"
         f"end = time.time() + {seconds}\n"
         "n = 0.0\n"
         "while time.time() < end:\n"
         "    n += sum(math.sqrt(i) for i in range(1000))\n"
-        f"print('cpu_spin done', round(time.time(), 3))\""
+        "print('cpu_spin done', round(time.time(), 3))\""
     )
     return Task(id=task_id, command=cmd, resources=Resources(cores=1, walltime_seconds=wt))
 
@@ -30,7 +40,7 @@ def mem_alloc(task_id: str, gb: float = 1.0, hold_s: float = 1.0) -> Task:
     """Allocate `gb` GB of bytes, hold for `hold_s`, release."""
     nbytes = int(gb * (1 << 30))
     cmd = (
-        "python3 -c \""
+        f"{_PY} -c \""
         f"import time; x = b'x'*{nbytes}; "
         f"print('mem_alloc holding', {gb}, 'GB'); "
         f"time.sleep({hold_s}); "
@@ -92,7 +102,7 @@ def exit_code(task_id: str, rc: int) -> Task:
 
 def segfault(task_id: str) -> Task:
     """Deliberate segfault. Tests signal-death exit code propagation."""
-    cmd = "python3 -c \"import ctypes; ctypes.string_at(0)\""
+    cmd = f"{_PY} -c \"import ctypes; ctypes.string_at(0)\""
     return Task(id=task_id, command=cmd, resources=Resources(cores=1, walltime_seconds=10))
 
 
