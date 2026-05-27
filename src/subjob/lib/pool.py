@@ -123,14 +123,28 @@ class Pool:
     # ----- claim / release / commit -----
 
     def pending_paths(self) -> list[Path]:
-        """Return pending task files, sorted by priority (descending), then by mtime."""
+        """Return pending task files, sorted by priority (descending), then by mtime.
+
+        Unreadable / corrupt YAMLs are quarantined to failed/ so they don't
+        poison-pill the polling loop forever.
+        """
         items: list[tuple[int, float, Path]] = []
         for p in self.pending_dir.iterdir():
             if p.suffix != ".yaml":
                 continue
             try:
                 t = Task.read(p)
-            except Exception:
+            except Exception as e:
+                dest = self.failed_dir / p.name
+                try:
+                    os.rename(p, dest)
+                    self.emit(
+                        "task_failed",
+                        p.stem,
+                        {"error": f"unreadable pending YAML: {e}"},
+                    )
+                except OSError:
+                    pass
                 continue
             items.append((-t.priority, p.stat().st_mtime, p))
         items.sort()

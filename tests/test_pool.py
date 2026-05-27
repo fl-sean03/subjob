@@ -102,3 +102,28 @@ def test_follow_yields_events_then_times_out(tmp_path):
     pool.submit(_mktask("t1"))
     seen = list(pool.follow(timeout_s=0.3, poll_interval=0.05))
     assert any(e["task_id"] == "t1" for e in seen)
+
+
+def test_pending_paths_quarantines_corrupt_yaml(tmp_path):
+    """A truncated/garbage YAML in pending/ must be quarantined to failed/
+    on the next call to pending_paths(), not poison-pill the worker.
+    """
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="ok", command="echo hi"))
+    corrupt = pool.pending_dir / "corrupt.yaml"
+    corrupt.write_text("!!! not yaml !!!\nunclosed: [\n")
+
+    # Before listing: corrupt is in pending/
+    assert corrupt.exists()
+    assert (pool.failed_dir / "corrupt.yaml").exists() is False
+
+    paths = pool.pending_paths()
+
+    # ok.yaml is returned; corrupt was moved out
+    assert [p.name for p in paths] == ["ok.yaml"]
+    assert corrupt.exists() is False
+    assert (pool.failed_dir / "corrupt.yaml").exists()
+    # Journal recorded the quarantine
+    types = [e["type"] for e in pool.read_journal()]
+    assert "task_failed" in types

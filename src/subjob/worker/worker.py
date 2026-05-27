@@ -163,7 +163,19 @@ class Worker:
         for path in self.pool.pending_paths():
             try:
                 peek = Task.read(path)
-            except Exception:
+            except Exception as e:
+                # Corrupt YAML in pending/ — quarantine to failed/ so we
+                # don't poison-pill on it every poll cycle.
+                log.warning("quarantining unreadable pending task %s: %s", path.name, e)
+                try:
+                    os.rename(path, self.pool.failed_dir / path.name)
+                    self.pool.emit(
+                        "task_failed",
+                        path.stem,
+                        {"error": f"unreadable pending YAML: {e}"},
+                    )
+                except OSError:
+                    pass
                 continue
             with self._lock:
                 if peek.resources.cores > self._cores_free:
