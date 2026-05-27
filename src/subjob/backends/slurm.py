@@ -29,7 +29,7 @@ SBATCH_TEMPLATE = """\
 set -euo pipefail
 
 # Worker uses SLURM_JOB_START_TIME + SLURM_JOB_TIMELIMIT for walltime awareness.
-{python} -m subjob.worker --pool "{pool_dir}" --cores {cores} {gpu_flag}
+{python} -m subjob.worker --pool "{pool_dir}" --cores {cores} {gpu_flag} {idle_flag}
 """
 
 
@@ -49,6 +49,7 @@ class SlurmBackend:
         walltime_seconds: int = 86400,
         partition: str | None = None,
         qos: str | None = None,
+        idle_timeout_seconds: float | None = None,
         extra_sbatch_args: list[str] | None = None,
     ) -> WorkerHandle:
         if shutil.which(self.sbatch_cmd) is None:
@@ -61,6 +62,7 @@ class SlurmBackend:
             walltime_seconds=walltime_seconds,
             partition=partition,
             qos=qos,
+            idle_timeout_seconds=idle_timeout_seconds,
         )
         pool_path = Path(pool_dir)
         (pool_path / "logs").mkdir(parents=True, exist_ok=True)
@@ -88,6 +90,7 @@ class SlurmBackend:
         walltime_seconds: int = 86400,
         partition: str | None = None,
         qos: str | None = None,
+        idle_timeout_seconds: float | None = None,
     ) -> str:
         extras = []
         if partition:
@@ -104,6 +107,7 @@ class SlurmBackend:
             python=self.python_executable,
             pool_dir=pool_dir,
             gpu_flag=f"--gpus {gpus}" if gpus > 0 else "",
+            idle_flag=f"--idle-timeout {idle_timeout_seconds}" if idle_timeout_seconds else "",
         )
 
     def status(self, handle: WorkerHandle) -> WorkerStatus:

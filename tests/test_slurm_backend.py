@@ -12,6 +12,20 @@ def test_render_script_basic():
     assert "/usr/bin/python3 -m subjob.worker --pool \"/scratch/pool\" --cores 64" in script
 
 
+def test_render_script_with_idle_timeout():
+    backend = SlurmBackend(python_executable="/usr/bin/python3")
+    script = backend.render_script(
+        pool_dir="/scratch/pool", cores=4, walltime_seconds=3600, idle_timeout_seconds=120
+    )
+    assert "--idle-timeout 120" in script
+
+
+def test_render_script_no_idle_timeout_by_default():
+    backend = SlurmBackend(python_executable="/usr/bin/python3")
+    script = backend.render_script(pool_dir="/scratch/pool", cores=4, walltime_seconds=3600)
+    assert "--idle-timeout" not in script
+
+
 def test_render_script_with_partition_qos_gpu():
     backend = SlurmBackend(python_executable="/usr/bin/python3")
     script = backend.render_script(
