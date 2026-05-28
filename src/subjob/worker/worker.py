@@ -25,15 +25,18 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any
 
 from subjob.lib.pool import ClaimedTask, Pool
 from subjob.lib.task import Task
 from subjob.worker.runner import ExitResult, run_task
+from subjob.worker.runner import _terminate as _terminate_proc
 
 log = logging.getLogger("subjob.worker")
 
 DEFAULT_POLL_INTERVAL = 1.0
 DEFAULT_WALLTIME_SAFETY = 60.0  # seconds reserved at end of allocation for cleanup
+DEFAULT_MAX_ATTEMPTS = 3  # release-and-retry cap before a task is failed
 
 
 @dataclass
@@ -120,6 +123,7 @@ class Worker:
         self._cores_free = capabilities.cores
         self._gpus_free = capabilities.gpus
         self._active: dict[Future, tuple[ClaimedTask, int, int]] = {}
+        self._running_procs: dict[str, Any] = {}  # task_id → Popen, for kill-on-shutdown
         self._lock = threading.Lock()
         self._shutdown = False
         self._executor: ThreadPoolExecutor | None = None
@@ -163,6 +167,22 @@ class Worker:
         # pending_tasks() returns cached (path, Task) pairs — no re-read here.
         # Corrupt-YAML quarantine is handled inside pending_tasks().
         for path, peek in self.pool.pending_tasks():
+            # Cap infinite walltime-bounce: a task repeatedly released without
+            # completing (e.g. it needs more time than any worker has) is
+            # failed rather than re-run forever.
+            max_attempts = int(peek.retry.get("max_attempts", DEFAULT_MAX_ATTEMPTS))
+            if self.pool.release_attempt_count(peek) >= max_attempts:
+                claimed = self.pool.claim(path)
+                if claimed is not None:
+                    self.pool.commit_failed(
+                        claimed,
+                        {
+                            "error": f"exceeded max_attempts ({max_attempts}) "
+                            "without completing — likely needs more walltime than available",
+                            "host": self.caps.host,
+                        },
+                    )
+                continue
             with self._lock:
                 if peek.resources.cores > self._cores_free:
                     continue
@@ -206,9 +226,24 @@ class Worker:
 
     def _run_one(self, claim: ClaimedTask) -> None:
         self.pool.emit("task_started", claim.task.id, {"host": self.caps.host})
-        result: ExitResult = run_task(claim.task, self.pool.logs_dir, host=self.caps.host)
+
+        def _register(proc):
+            with self._lock:
+                self._running_procs[claim.task.id] = proc
+
+        result: ExitResult = run_task(
+            claim.task, self.pool.logs_dir, host=self.caps.host, on_spawn=_register
+        )
+        with self._lock:
+            self._running_procs.pop(claim.task.id, None)
+
         if result.succeeded:
             self.pool.commit_done(claim, result.to_dict())
+        elif self._shutdown:
+            # We were told to stop and the task didn't finish cleanly — release
+            # it (back to pending) so another worker retries, rather than
+            # recording a spurious failure. This is the clean-preemption path.
+            self.pool.release(claim, reason="worker_shutdown")
         else:
             self.pool.commit_failed(claim, result.to_dict())
 
@@ -233,25 +268,27 @@ class Worker:
                 return False
         return time.time() - last_activity > self.idle_timeout_s
 
-    def _drain_or_release(self) -> None:
-        """Wait briefly for in-flight tasks, then release any still-claimed ones."""
+    def _drain_or_release(self, grace_s: float = 5.0) -> None:
+        """On shutdown, give running tasks a brief grace to finish, then kill
+        their subprocesses so they don't orphan or double-run.
+
+        Each task thread releases its OWN claim (see _run_one's shutdown
+        branch) once its subprocess exits — so this method only needs to (a)
+        wait briefly for natural completion and (b) terminate stragglers.
+        executor.shutdown(wait=True) in run() then joins the threads quickly.
+        """
         if not self._active:
             return
-        # Give running tasks a chance to finish naturally before yanking the rug.
-        deadline = time.time() + 5.0
+        deadline = time.time() + grace_s
         while self._active and time.time() < deadline:
             self._reap_finished()
             time.sleep(0.1)
+        # Kill any still-running subprocesses; their threads will then release.
         with self._lock:
-            stragglers = list(self._active.items())
-        for future, (claim, _cores, _gpus) in stragglers:
-            if not future.done():
-                # We can't preempt the thread cleanly; the subprocess will keep
-                # running until the SLURM allocation hard-kills it. Release the
-                # claim so a future worker can retry.
-                self.pool.release(claim)
-                with self._lock:
-                    self._active.pop(future, None)
+            procs = list(self._running_procs.items())
+        for task_id, proc in procs:
+            log.info("terminating in-flight task %s on shutdown", task_id)
+            _terminate_proc(proc)
 
     def _install_signal_handlers(self) -> None:
         def handler(signum, _frame):

@@ -52,6 +52,7 @@ class Task:
     command: str
     priority: int = 0
     state: str = "pending"
+    workdir: str = ""  # if set, the runner cd's here before running the command
     env: dict[str, str] = field(default_factory=dict)
     resources: Resources = field(default_factory=Resources)
     backend_hints: dict[str, Any] = field(default_factory=dict)
@@ -74,6 +75,7 @@ class Task:
             "id": self.id,
             "priority": self.priority,
             "state": self.state,
+            "workdir": self.workdir,
             "command": self.command,
             "env": dict(self.env),
             "resources": self.resources.to_dict(),
@@ -101,6 +103,7 @@ class Task:
             command=d["command"],
             priority=int(d.get("priority", 0)),
             state=d.get("state") or "pending",
+            workdir=d.get("workdir") or "",
             env=env,
             resources=Resources.from_dict(d.get("resources")),
             backend_hints=d.get("backend_hints") or {},

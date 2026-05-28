@@ -45,6 +45,30 @@ def main(argv: list[str] | None = None) -> int:
     p_cancel.add_argument("--task-id", required=True)
     p_cancel.set_defaults(func=cmd_cancel)
 
+    p_reap = sub.add_parser(
+        "reap-stale",
+        help="Recover tasks stuck in claimed/ from a dead worker (manual; Phase 0 has no heartbeats)",
+    )
+    p_reap.add_argument("--pool", required=True)
+    p_reap.add_argument(
+        "--older-than",
+        type=float,
+        required=True,
+        help="Reap claimed tasks whose file mtime is older than this many seconds",
+    )
+    p_reap.add_argument(
+        "--to",
+        choices=("pending", "failed"),
+        default="pending",
+        help="Where to move stale claims (default: pending, so a live worker retries them)",
+    )
+    p_reap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be reaped without moving anything",
+    )
+    p_reap.set_defaults(func=cmd_reap_stale)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -106,6 +130,50 @@ def cmd_cancel(args) -> int:
         return 2
     _emit(args.format, {"error": "task not found in pool", "task_id": args.task_id})
     return 1
+
+
+def cmd_reap_stale(args) -> int:
+    """Move tasks stuck in claimed/ (dead worker) back to pending/ or failed/.
+
+    Phase 0 has no heartbeats, so a worker whose node dies leaves its claims
+    orphaned. This is the manual operator recovery path: anything in claimed/
+    older than --older-than is reaped. Use a threshold safely larger than your
+    longest task's walltime so you don't reap live work.
+    """
+    import os
+    import time
+
+    pool = Pool(args.pool)
+    now = time.time()
+    reaped = []
+    for p in sorted(pool.claimed_dir.iterdir()) if pool.claimed_dir.exists() else []:
+        if p.suffix != ".yaml":
+            continue
+        try:
+            age = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if age < args.older_than:
+            continue
+        if args.dry_run:
+            reaped.append({"task_id": p.stem, "age_s": round(age, 1), "action": "would-reap"})
+            continue
+        dest_dir = pool.pending_dir if args.to == "pending" else pool.failed_dir
+        try:
+            if args.to == "failed":
+                task = Task.read(p)
+                task.state = "failed"
+                task.attempts = list(task.attempts) + [{"reaped_stale": True, "age_s": round(age, 1)}]
+                p.write_text(task.to_yaml())
+            os.rename(p, dest_dir / p.name)
+            pool._pending_cache.pop(p.name, None)
+            event = "task_released" if args.to == "pending" else "task_failed"
+            pool.emit(event, p.stem, {"reaped_stale": True, "age_s": round(age, 1)})
+            reaped.append({"task_id": p.stem, "age_s": round(age, 1), "moved_to": args.to})
+        except OSError as e:
+            reaped.append({"task_id": p.stem, "error": str(e)})
+    _emit(args.format, {"reaped": reaped, "count": len(reaped), "dry_run": args.dry_run})
+    return 0
 
 
 def _emit(fmt: str, obj: dict) -> None:

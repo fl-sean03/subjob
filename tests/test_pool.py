@@ -212,3 +212,38 @@ def test_journal_concurrent_writers_no_loss(tmp_path):
     assert len(done) == 8 * 50  # no events lost
     # All lines parsed cleanly (no torn lines)
     assert len({e["task_id"] for e in done}) == 8 * 50
+
+
+def test_submit_exclusive_create_rejects_concurrent_duplicate(tmp_path):
+    """Two submits of the same id: second must fail even if the dedup check
+    is bypassed (simulates the TOCTOU window)."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="dup", command="echo hi"))
+    # Direct second submit hits both the soft check and the os.link guard
+    with pytest.raises(ValueError, match="already in pool"):
+        pool.submit(Task(id="dup", command="echo hi"))
+    assert pool.status()["pending"] == 1
+
+
+def test_release_records_attempt_and_invalidates_cache(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="t1", command="echo hi"))
+    claimed = pool.claim(pool.pending_dir / "t1.yaml")
+    assert pool.release(claimed, reason="walltime") is True
+    # Task back in pending with a recorded release attempt
+    t = Task.read(pool.pending_dir / "t1.yaml")
+    assert pool.release_attempt_count(t) == 1
+    assert t.attempts[-1]["reason"] == "walltime"
+
+
+def test_release_attempt_count_accumulates(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="t1", command="echo hi"))
+    for _ in range(3):
+        claimed = pool.claim(pool.pending_dir / "t1.yaml")
+        pool.release(claimed)
+    t = Task.read(pool.pending_dir / "t1.yaml")
+    assert pool.release_attempt_count(t) == 3

@@ -71,3 +71,35 @@ def test_text_format(tmp_path):
     Pool(tmp_path / "p").init()
     r = _run(["--format", "text", "status", "--pool", str(tmp_path / "p")])
     assert "pending: 0" in r.stdout
+
+
+def test_reap_stale_moves_old_claims(tmp_path):
+    import os
+    import time
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="stuck", command="echo hi"))
+    # Simulate a dead-worker claim: move to claimed/ and backdate mtime
+    os.rename(pool.pending_dir / "stuck.yaml", pool.claimed_dir / "stuck.yaml")
+    old = time.time() - 10000
+    os.utime(pool.claimed_dir / "stuck.yaml", (old, old))
+
+    r = _run(["reap-stale", "--pool", str(tmp_path / "p"), "--older-than", "3600"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    # Task moved back to pending
+    assert pool.status()["pending"] == 1
+    assert pool.status()["claimed"] == 0
+
+
+def test_reap_stale_respects_threshold(tmp_path):
+    import os
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="fresh", command="echo hi"))
+    os.rename(pool.pending_dir / "fresh.yaml", pool.claimed_dir / "fresh.yaml")
+    # Fresh mtime → should NOT be reaped with a 1h threshold
+    r = _run(["reap-stale", "--pool", str(tmp_path / "p"), "--older-than", "3600"])
+    assert json.loads(r.stdout)["count"] == 0
+    assert pool.status()["claimed"] == 1

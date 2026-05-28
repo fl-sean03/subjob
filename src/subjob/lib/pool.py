@@ -56,11 +56,12 @@ class Pool:
         self.logs_dir = self.root / "logs"
         self.staging_dir = self.root / ".staging"
         self.journal_path = self.root / "journal.jsonl"
-        # Cache of parsed pending tasks keyed by filename. Pending YAMLs are
-        # immutable once written (write-then-rename), so a cached Task never
-        # goes stale — this turns the per-poll cost from O(N reads) to
-        # O(N stat + new-file reads). See validation/PLAN.md F-001.
-        self._pending_cache: dict[str, Task] = {}
+        # Cache of parsed pending tasks keyed by filename → (mtime, Task).
+        # Validated by mtime so a re-written file (e.g. a released task that
+        # recorded an attempt) is re-read rather than served stale. Turns the
+        # per-poll cost from O(N reads) to O(N stat + changed-file reads).
+        # See validation/PLAN.md F-001.
+        self._pending_cache: dict[str, tuple[float, Task]] = {}
 
     # ----- lifecycle -----
 
@@ -80,15 +81,32 @@ class Pool:
     # ----- submit -----
 
     def submit(self, task: Task) -> str:
-        """Atomically place a single task in pending/. Returns the task id."""
+        """Atomically place a single task in pending/. Returns the task id.
+
+        Uses an exclusive hardlink (os.link) into pending/ so two concurrent
+        submitters racing on the same task id can't clobber each other — the
+        loser gets FileExistsError, which we surface as a duplicate-id error.
+        The soft _task_exists_anywhere check still gives a friendly error for
+        ids already in claimed/done/failed.
+        """
         self.init()
         if self._task_exists_anywhere(task.id):
             raise ValueError(f"task id already in pool: {task.id!r}")
         text = task.to_yaml()
-        # Write-then-rename so workers never see a partial YAML.
+        # Write to staging, then exclusive-link into pending/.
         tmp_path = self._stage_write(task.id, text)
         target = self.pending_dir / f"{task.id}.yaml"
-        os.rename(tmp_path, target)
+        try:
+            os.link(tmp_path, target)  # atomic; raises FileExistsError if id taken
+        except FileExistsError:
+            os.unlink(tmp_path)
+            raise ValueError(f"task id already in pool: {task.id!r}") from None
+        finally:
+            # Drop the staging link; the pending/ link remains.
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
         self.emit("task_submitted", task.id, {"priority": task.priority})
         return task.id
 
@@ -148,9 +166,17 @@ class Pool:
             if p.suffix != ".yaml":
                 continue
             name = p.name
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                # File vanished (claimed by another worker between listing
+                # and stat) — skip it this cycle.
+                continue
             live_names.add(name)
-            task = self._pending_cache.get(name)
-            if task is None:
+            cached = self._pending_cache.get(name)
+            if cached is not None and cached[0] == mtime:
+                task = cached[1]
+            else:
                 try:
                     task = Task.read(p)
                 except Exception as e:
@@ -165,13 +191,7 @@ class Pool:
                     except OSError:
                         pass
                     continue
-                self._pending_cache[name] = task
-            try:
-                mtime = p.stat().st_mtime
-            except OSError:
-                # File vanished (claimed by another worker between listing
-                # and stat) — skip it this cycle.
-                continue
+                self._pending_cache[name] = (mtime, task)
             items.append((-task.priority, mtime, p, task))
         # Evict cache entries for files no longer pending (claimed/done).
         for stale in self._pending_cache.keys() - live_names:
@@ -196,13 +216,33 @@ class Pool:
             raise
         return ClaimedTask(task=task, path=target)
 
-    def release(self, claimed: ClaimedTask) -> bool:
-        """Move a claimed task back to pending. Used when a worker shuts down mid-claim."""
+    def release(self, claimed: ClaimedTask, reason: str = "") -> bool:
+        """Move a claimed task back to pending, recording a release attempt.
+
+        Records an attempt marker in the YAML before moving so a re-claiming
+        worker can see how many times this task has been released (used to
+        cap infinite walltime-bounce — see Worker._dispatch_pending).
+        """
+        task = claimed.task
+        task.attempts = list(task.attempts) + [
+            {"released": True, "reason": reason or "worker_shutdown"}
+        ]
+        try:
+            claimed.path.write_text(task.to_yaml())
+        except OSError:
+            pass
         dest = self.pending_dir / claimed.path.name
         if atomic_move(claimed.path, dest):
-            self.emit("task_released", claimed.task.id, {})
+            # Invalidate any stale cache entry; the file's content changed.
+            self._pending_cache.pop(claimed.path.name, None)
+            self.emit("task_released", task.id, {"reason": reason or "worker_shutdown"})
             return True
         return False
+
+    @staticmethod
+    def release_attempt_count(task: Task) -> int:
+        """How many times this task has been released without completing."""
+        return sum(1 for a in task.attempts if a.get("released"))
 
     def commit_done(self, claimed: ClaimedTask, payload: dict[str, Any]) -> None:
         self._finalize(claimed, "done", "task_done", payload)

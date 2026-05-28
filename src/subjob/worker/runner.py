@@ -57,7 +57,17 @@ class ExitResult:
         return self.exit_code == 0 and not self.walltime_killed and not self.error
 
 
-def run_task(task: Task, logs_dir: Path, host: str | None = None) -> ExitResult:
+def run_task(
+    task: Task,
+    logs_dir: Path,
+    host: str | None = None,
+    on_spawn=None,
+) -> ExitResult:
+    """Run one task as a subprocess.
+
+    on_spawn: optional callback invoked with the Popen handle right after
+    spawn, so the caller (the worker) can terminate it on shutdown.
+    """
     host = host or socket.gethostname()
     stdout_path = logs_dir / f"{task.id}.out"
     stderr_path = logs_dir / f"{task.id}.err"
@@ -65,6 +75,11 @@ def run_task(task: Task, logs_dir: Path, host: str | None = None) -> ExitResult:
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in task.env.items()})
+
+    # Resolve workdir (with env-var expansion) if the task declares one.
+    cwd = None
+    if task.workdir:
+        cwd = os.path.expandvars(os.path.expanduser(task.workdir))
 
     started_wall = time.time()
     started_at = _iso(started_wall)
@@ -82,7 +97,10 @@ def run_task(task: Task, logs_dir: Path, host: str | None = None) -> ExitResult:
                 stdout=out,
                 stderr=err,
                 env=env,
+                cwd=cwd,
             )
+            if on_spawn is not None:
+                on_spawn(proc)
             try:
                 rc = proc.wait(timeout=walltime if walltime > 0 else None)
             except subprocess.TimeoutExpired:

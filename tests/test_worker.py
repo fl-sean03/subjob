@@ -135,3 +135,63 @@ def test_worker_entrypoint_runs(tmp_path):
     )
     assert result.returncode == 0, result.stderr.decode()
     assert pool.status()["done"] == 1
+
+
+def test_worker_caps_release_attempts(tmp_path):
+    """A task released past max_attempts must be failed, not re-run forever."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    # Pre-load a task that already has 3 release attempts recorded
+    t = Task(
+        id="bouncer",
+        command="echo hi",
+        retry={"max_attempts": 3},
+        attempts=[{"released": True}, {"released": True}, {"released": True}],
+    )
+    pool.submit(t)
+    Worker(pool, Capabilities(cores=2, host="t"), poll_interval=0.05, idle_timeout_s=0.5).run()
+    s = pool.status()
+    assert s["failed"] == 1 and s["done"] == 0
+    failed = pool.read_task("failed", "bouncer")
+    assert "exceeded max_attempts" in failed.attempts[-1]["error"]
+
+
+def test_runner_honors_workdir(tmp_path):
+    from subjob.worker.runner import run_task
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    task = Task(id="t1", command="pwd", workdir=str(sub))
+    result = run_task(task, tmp_path / "logs")
+    assert result.exit_code == 0
+    assert str(sub) in result.stdout_tail
+
+
+def test_worker_sigterm_releases_inflight_task(tmp_path):
+    """SIGTERM to a worker mid-task must release the claim (not fail it) and
+    not hang on the in-flight subprocess. Models SLURM preemption."""
+    import signal as _signal
+
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="long", command="echo go; sleep 30; echo done",
+                     resources=Resources(cores=1, walltime_seconds=120)))
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "subjob.worker", "--pool", str(tmp_path / "p"),
+         "--cores", "2", "--poll-interval", "0.2", "--idle-timeout", "120",
+         "--log-level", "WARNING"],
+    )
+    # Wait until claimed + running
+    for _ in range(50):
+        if pool.status()["claimed"] == 1:
+            break
+        time.sleep(0.2)
+    time.sleep(1.0)
+    proc.send_signal(_signal.SIGTERM)
+    # Must exit promptly (the fix kills the in-flight subprocess; no 30s hang)
+    proc.wait(timeout=20)
+    # Task released back to pending, not failed
+    s = pool.status()
+    assert s["pending"] == 1, s
+    assert s["failed"] == 0, s
+    types = [e["type"] for e in pool.read_journal()]
+    assert "task_released" in types

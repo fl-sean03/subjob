@@ -354,6 +354,38 @@ Each sub-tier:
 | **Cost** | Variable (blanca queue can be long); 1–6 hr wall |
 | **Pass criterion** | Each partition has at least one task in done/ |
 
+### Tier VIII — Production readiness
+
+Models real-deployment hazards that trivial echo/sleep tiers never
+exercised. Derived from the pre-deployment audit (items A–L). Each
+scenario runs locally by orchestrating worker subprocesses (tests logic,
+not cluster scheduling) via `validation/tiers/tier_8_production.py`.
+
+| Scenario | Models | Gates | Status |
+|---|---|---|---|
+| **VIII.A** SIGTERM preemption mid-task | SLURM preempt / `scancel` of a worker running a long task | claim *released* (not failed) → fresh worker reclaims → completes; worker exits promptly (in-flight subprocess killed, no orphan/double-run) | ✅ 5/5 |
+| **VIII.B** max-attempts cap | a task needing more walltime than any worker has | after `retry.max_attempts` releases → moved to `failed/`, doesn't bounce forever | ✅ 3/3 |
+| **VIII.C** reap-stale recovery | a worker node dying (no heartbeats in Phase 0) | `subjob reap-stale` returns the orphaned claim to pending → a worker finishes it | ✅ 3/3 |
+| **VIII.L** workdir contract | tasks that must run in a specific directory | `Task.workdir` honored by the runner | ✅ 3/3 |
+
+**Code changes this tier drove (commit set 2026-05-28):**
+- Worker shutdown now kills in-flight subprocesses and each task thread
+  releases its *own* claim (clean preemption — no orphan, no double-run,
+  no `executor.shutdown` hang). A pytest
+  (`test_worker_sigterm_releases_inflight_task`) covers it.
+- `Pool.release()` records a release attempt; worker caps re-claims at
+  `retry.max_attempts` (default 3).
+- `submit()` uses exclusive create (`os.link`) — concurrent-submitter
+  TOCTOU safe.
+- New `subjob reap-stale` CLI for manual dead-node recovery.
+- `Task.workdir` field + runner `cwd=`.
+- Pending cache is mtime-validated (handles release-rewrites safely).
+
+**Still deferred (documented in `docs/DEPLOYMENT.md § 5`):** real GPU
+task, single-node MPI task, real research binaries (module chain), and
+multi-week pool growth/archival. These have code paths but no real-hardware
+end-to-end run yet.
+
 ---
 
 ## 5. Aggregate pass criteria — "Phase 0 fully validated"

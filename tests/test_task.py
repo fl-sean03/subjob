@@ -71,3 +71,14 @@ def test_state_round_trip_for_failed_task():
     back = Task.from_yaml(t.to_yaml())
     assert back.state == "failed"
     assert back.attempts == t.attempts
+
+
+def test_workdir_round_trip():
+    t = Task(id="t1", command="echo hi", workdir="/scratch/x")
+    back = Task.from_yaml(t.to_yaml())
+    assert back.workdir == "/scratch/x"
+
+
+def test_workdir_default_empty():
+    t = Task(id="t1", command="echo hi")
+    assert t.workdir == ""
