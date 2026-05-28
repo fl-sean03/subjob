@@ -208,7 +208,14 @@ See `workloads.py` table above.
 | D.b | 200 | 4 × 4 | 4× scale, 4-way concurrency per worker |
 | D.c | 500 | 4 × 4 | Same workers, longer pool — surfaces queue depth issues |
 | D.d | 1000 | 8 × 8 | Production-like load (close to real per-snapshot fan-out) |
-| D.x | 100 | 2 × 1 with `--nodelist` exclusion | Force cross-node race |
+| D.x | 100 | 4 × 2 with `--exclusive` | Force cross-node race — superseded by D.d which naturally landed on 8 unique nodes |
+
+**Note 2026-05-27:** Tier IV.d incidentally exercised the cross-node case
+when SLURM distributed its 8 workers across 8 different compute nodes
+(c3cpu-{a5-u1-2, a5-u7-4, a7-u3-4, a9-u13-4, a9-u3-3, c11-u13-2,
+c11-u15-1, c9-u20}). All 1000 tasks were claimed exactly once. The
+explicit `--exclusive` variant of IV.x is therefore redundant and queues
+slowly — leave it as an optional manual check.
 
 ### Category E — recovery / chaos
 
