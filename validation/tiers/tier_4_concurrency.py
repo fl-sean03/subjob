@@ -30,6 +30,7 @@ PROFILES = {
     "b": dict(tasks=200, workers=4, cores=4, label="IV.b 200 × 4 × 4"),
     "c": dict(tasks=500, workers=4, cores=4, label="IV.c 500 × 4 × 4"),
     "d": dict(tasks=1000, workers=8, cores=8, label="IV.d 1000 × 8 × 8"),
+    "x": dict(tasks=100, workers=4, cores=2, label="IV.x cross-node (100 × 4 × 2 with --exclusive)"),
 }
 
 
@@ -60,6 +61,9 @@ def build_gates(n_tasks, expected_min_concurrent):
 def build_spec(letter, backend, partition, qos):
     p = PROFILES[letter]
     expected_concurrency = max(p["workers"] * p["cores"] // 2, 2)
+    # IV.x forces each worker onto its own node via --exclusive — exercises
+    # cross-node atomic rename.
+    extra = ["--exclusive"] if letter == "x" else []
     return TierSpec(
         name=f"Tier IV.{letter} — {p['label']}",
         description=f"{p['tasks']} tasks across {p['workers']} workers × {p['cores']} cores.",
@@ -73,6 +77,7 @@ def build_spec(letter, backend, partition, qos):
             partition=partition,
             qos=qos,
             n_workers=p["workers"],
+            extra_sbatch_args=extra,
         ),
         poll_timeout_s=2400,
         expected_terminal_tasks=p["tasks"],

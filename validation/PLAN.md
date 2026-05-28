@@ -527,6 +527,38 @@ What could still surprise us, ordered by likelihood × impact:
 | Worker thread crash in `_run_one` → claim stranded | Low | Medium (one task lost) | Tier 0 tests this via an exception-raising mock; remediation: `_reap_finished` already catches and commits as failed |
 | Phase 0 anti-feature genuinely needed mid-test | Low | High (scope creep) | Documented escalation path in § Remediation |
 
+## 9. Findings from validation runs
+
+### F-001 — Pool listing dominates throughput at 5k+ tasks  (2026-05-27, Tier V.E3)
+
+**Symptom:** With 5000 tasks pending and one 8-core worker, sustained
+throughput drops from ~9 tasks/s (Tier IV.b, 200 tasks) to ~2.4 tasks/s.
+Worker hit its 30-min walltime with 882/5000 tasks still pending.
+
+**Root cause:** `Pool.pending_paths()` reads every YAML in pending/ on
+every poll cycle to extract priority for sorting. With 5000 files in
+pending/, each poll cycle parses 5000 YAML files. At ~1 ms per parse,
+that's ~5 s per poll — and a poll happens every time the worker reaps a
+finished task, so the cost is paid per-completion.
+
+**Phase-0 status:** Not a blocker for the per-snapshot dogfood workload
+(60 tasks). Documented as a known limitation.
+
+**Phase-1 fix candidates:**
+  - Encode priority in the filename (e.g., `priority_NNN/task_id.yaml`)
+    so directory listing yields priority without read.
+  - Cache `(filename → priority)` map and invalidate only when
+    `pending/` mtime changes.
+  - Bucket pending/ by priority subdirs.
+
+**Cure:** Either of the above. None affect the public API.
+
+### F-002 — Claim-latency metric in Tier VI confounded by queue wait  (2026-05-27)
+
+Tier VI reports claim latency p50=253s. This is `task_claimed.timestamp - task_submitted.timestamp` — but the worker spent ~4 min in the SLURM queue before running. The metric mixes "subjob is slow to claim" and "SLURM queue is busy" into one number.
+
+**Future:** add a Tier VI gate using `(task_claimed - worker_started)` as the latency baseline.
+
 ---
 
 ## 9. Conventions & how to add new tests
