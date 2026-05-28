@@ -132,6 +132,30 @@ wait, which is unrelated to subjob's performance. Future Tier VI runs
 should report `task_claimed − worker_started` instead. Documented; no
 code change needed.
 
+### Tier VIII — production readiness (2026-05-28)
+
+Derived from the pre-deployment audit. Local scenarios all green
+(A 5/5, B 3/3, C 3/3, L 3/3) plus a **real-cluster preemption test** on
+Alpine that caught the highest-value bug of the whole effort:
+
+- **F-004 (FIXED) — preemption orphaned claims.** A `scancel`'d worker
+  left its task stuck in `claimed/` with no release. Exit code `0:15`
+  revealed SLURM sent SIGTERM to the *batch script* (bash), not the worker
+  — the worker was a bash child, so it only died at the later uncatchable
+  SIGKILL. The local SIGTERM test missed this (it signaled python
+  directly). **Fix:** sbatch wrapper now `exec`s the worker so SLURM's
+  signals hit it directly. Re-tested on Alpine: scancel → worker logs
+  "received signal 15; shutting down" → "terminating in-flight task" →
+  claim released to `pending/`. Clean preemption recovery confirmed
+  end-to-end on real SLURM.
+- **`subjob reap-stale` validated on a real orphaned claim** on Alpine —
+  recovered it to `pending/` (the recovery path for hard-killed workers).
+- Also fixed in this tier: in-flight subprocess kill on shutdown (no
+  orphan/double-run, no `executor.shutdown` hang), release-attempt cap,
+  TOCTOU-safe submit, `Task.workdir`, mtime-validated cache.
+
+See `docs/DEPLOYMENT.md` for the full operational contract.
+
 ### Bugs fixed during validation
 
 - **SLURM backend wasn't passing `--idle-timeout`** to the worker
