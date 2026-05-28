@@ -28,6 +28,13 @@ from typing import Any
 from subjob.lib.lock import atomic_move
 from subjob.lib.task import Task
 
+try:
+    import fcntl  # POSIX only; used to serialize journal appends across writers
+
+    _HAVE_FCNTL = True
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    _HAVE_FCNTL = False
+
 STATES = ("pending", "claimed", "done", "failed")
 
 
@@ -49,6 +56,11 @@ class Pool:
         self.logs_dir = self.root / "logs"
         self.staging_dir = self.root / ".staging"
         self.journal_path = self.root / "journal.jsonl"
+        # Cache of parsed pending tasks keyed by filename. Pending YAMLs are
+        # immutable once written (write-then-rename), so a cached Task never
+        # goes stale — this turns the per-poll cost from O(N reads) to
+        # O(N stat + new-file reads). See validation/PLAN.md F-001.
+        self._pending_cache: dict[str, Task] = {}
 
     # ----- lifecycle -----
 
@@ -122,33 +134,54 @@ class Pool:
 
     # ----- claim / release / commit -----
 
-    def pending_paths(self) -> list[Path]:
-        """Return pending task files, sorted by priority (descending), then by mtime.
+    def pending_tasks(self) -> list[tuple[Path, Task]]:
+        """Return (path, Task) for each pending file, priority-sorted.
 
-        Unreadable / corrupt YAMLs are quarantined to failed/ so they don't
-        poison-pill the polling loop forever.
+        Uses a per-Pool cache so each immutable pending YAML is parsed at
+        most once across the lifetime of this Pool object (the worker's
+        poll loop reuses one Pool). Unreadable YAMLs are quarantined to
+        failed/ so they don't poison-pill the loop.
         """
-        items: list[tuple[int, float, Path]] = []
+        items: list[tuple[int, float, Path, Task]] = []
+        live_names: set[str] = set()
         for p in self.pending_dir.iterdir():
             if p.suffix != ".yaml":
                 continue
-            try:
-                t = Task.read(p)
-            except Exception as e:
-                dest = self.failed_dir / p.name
+            name = p.name
+            live_names.add(name)
+            task = self._pending_cache.get(name)
+            if task is None:
                 try:
-                    os.rename(p, dest)
-                    self.emit(
-                        "task_failed",
-                        p.stem,
-                        {"error": f"unreadable pending YAML: {e}"},
-                    )
-                except OSError:
-                    pass
+                    task = Task.read(p)
+                except Exception as e:
+                    dest = self.failed_dir / name
+                    try:
+                        os.rename(p, dest)
+                        self.emit(
+                            "task_failed",
+                            p.stem,
+                            {"error": f"unreadable pending YAML: {e}"},
+                        )
+                    except OSError:
+                        pass
+                    continue
+                self._pending_cache[name] = task
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                # File vanished (claimed by another worker between listing
+                # and stat) — skip it this cycle.
                 continue
-            items.append((-t.priority, p.stat().st_mtime, p))
-        items.sort()
-        return [p for _, _, p in items]
+            items.append((-task.priority, mtime, p, task))
+        # Evict cache entries for files no longer pending (claimed/done).
+        for stale in self._pending_cache.keys() - live_names:
+            del self._pending_cache[stale]
+        items.sort(key=lambda it: (it[0], it[1]))
+        return [(p, t) for _, _, p, t in items]
+
+    def pending_paths(self) -> list[Path]:
+        """Return pending task files, priority-sorted. Thin wrapper over pending_tasks()."""
+        return [p for p, _ in self.pending_tasks()]
 
     def claim(self, pending_path: Path) -> ClaimedTask | None:
         """Try to claim a pending task. Returns the loaded task or None on race loss."""
@@ -198,8 +231,22 @@ class Pool:
             "payload": payload,
         }
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.journal_path, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        line = (json.dumps(event) + "\n").encode("utf-8")
+        # Serialize appends across all writers (threads in one worker AND
+        # separate worker processes / nodes sharing this journal). flock is
+        # advisory but honored by every subjob writer; combined with a single
+        # os.write it keeps lines from interleaving on shared filesystems.
+        fd = os.open(self.journal_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            if _HAVE_FCNTL:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.write(fd, line)
+            finally:
+                if _HAVE_FCNTL:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
         return event
 
     def read_journal(self, since_event_id: int = 0) -> list[dict[str, Any]]:
@@ -211,8 +258,13 @@ class Pool:
                 line = line.strip()
                 if not line:
                     continue
-                ev = json.loads(line)
-                if ev["event_id"] > since_event_id:
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    # Tolerate a rare torn line from concurrent appends rather
+                    # than failing the whole read. flock makes this unlikely.
+                    continue
+                if ev.get("event_id", 0) > since_event_id:
                     out.append(ev)
         return out
 
@@ -234,8 +286,11 @@ class Pool:
                     line = line.strip()
                     if not line:
                         continue
-                    ev = json.loads(line)
-                    if ev["event_id"] > last_id:
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if ev.get("event_id", 0) > last_id:
                         last_id = ev["event_id"]
                         yield ev
                     continue

@@ -160,23 +160,9 @@ class Worker:
 
     def _dispatch_pending(self) -> int:
         claimed_count = 0
-        for path in self.pool.pending_paths():
-            try:
-                peek = Task.read(path)
-            except Exception as e:
-                # Corrupt YAML in pending/ — quarantine to failed/ so we
-                # don't poison-pill on it every poll cycle.
-                log.warning("quarantining unreadable pending task %s: %s", path.name, e)
-                try:
-                    os.rename(path, self.pool.failed_dir / path.name)
-                    self.pool.emit(
-                        "task_failed",
-                        path.stem,
-                        {"error": f"unreadable pending YAML: {e}"},
-                    )
-                except OSError:
-                    pass
-                continue
+        # pending_tasks() returns cached (path, Task) pairs — no re-read here.
+        # Corrupt-YAML quarantine is handled inside pending_tasks().
+        for path, peek in self.pool.pending_tasks():
             with self._lock:
                 if peek.resources.cores > self._cores_free:
                     continue

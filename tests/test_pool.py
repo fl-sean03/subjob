@@ -127,3 +127,88 @@ def test_pending_paths_quarantines_corrupt_yaml(tmp_path):
     # Journal recorded the quarantine
     types = [e["type"] for e in pool.read_journal()]
     assert "task_failed" in types
+
+
+def test_pending_tasks_caches_parsed_yaml(tmp_path, monkeypatch):
+    """pending_tasks() must parse each immutable pending YAML at most once
+    across repeated polls (the F-001 fix)."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    for i in range(10):
+        pool.submit(Task(id=f"t{i}", command="echo hi", priority=i))
+
+    import subjob.lib.task as task_mod
+    calls = {"n": 0}
+    real_read = task_mod.Task.read
+
+    def counting_read(path):
+        calls["n"] += 1
+        return real_read(path)
+
+    monkeypatch.setattr(task_mod.Task, "read", staticmethod(counting_read))
+
+    first = pool.pending_tasks()
+    reads_after_first = calls["n"]
+    assert reads_after_first == 10  # each file read once
+    # Priority-sorted: highest first
+    assert [p.stem for p, _ in first][:3] == ["t9", "t8", "t7"]
+
+    # Second poll: no new reads (all cached)
+    pool.pending_tasks()
+    assert calls["n"] == reads_after_first  # unchanged → cache hit
+
+    # New submission triggers exactly one more read
+    pool.submit(Task(id="t99", command="echo hi", priority=99))
+    pool.pending_tasks()
+    assert calls["n"] == reads_after_first + 1
+
+
+def test_pending_cache_evicts_claimed(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="a", command="echo hi"))
+    pool.submit(Task(id="b", command="echo hi"))
+    pool.pending_tasks()
+    assert set(pool._pending_cache) == {"a.yaml", "b.yaml"}
+    # Claim a → it leaves pending/; next pending_tasks() should evict it
+    pool.claim(pool.pending_dir / "a.yaml")
+    pool.pending_tasks()
+    assert set(pool._pending_cache) == {"b.yaml"}
+
+
+def test_journal_tolerates_torn_line(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.emit("task_done", "ok1", {})
+    # Simulate a torn/interleaved write by appending garbage
+    with open(pool.journal_path, "a") as f:
+        f.write('{"event_id": 123, "type": "tas')  # no newline, truncated
+        f.write("\n")
+    pool.emit("task_done", "ok2", {})
+    events = pool.read_journal()
+    # Both good events survive; the torn line is skipped
+    ids = [e["task_id"] for e in events]
+    assert "ok1" in ids and "ok2" in ids
+
+
+def test_journal_concurrent_writers_no_loss(tmp_path):
+    """Many threads emitting concurrently must not lose or corrupt events."""
+    import threading
+    pool = Pool(tmp_path / "p")
+    pool.init()
+
+    def emit_many(worker_id):
+        for i in range(50):
+            pool.emit("task_done", f"w{worker_id}_t{i}", {"worker": worker_id})
+
+    threads = [threading.Thread(target=emit_many, args=(w,)) for w in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    events = pool.read_journal()
+    done = [e for e in events if e["type"] == "task_done"]
+    assert len(done) == 8 * 50  # no events lost
+    # All lines parsed cleanly (no torn lines)
+    assert len({e["task_id"] for e in done}) == 8 * 50
