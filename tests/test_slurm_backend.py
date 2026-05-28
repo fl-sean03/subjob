@@ -10,6 +10,9 @@ def test_render_script_basic():
     assert "#SBATCH --cpus-per-task=64" in script
     assert "#SBATCH --time=24:00:00" in script
     assert "/usr/bin/python3 -m subjob.worker --pool \"/scratch/pool\" --cores 64" in script
+    # Worker must be exec'd so SLURM's SIGTERM reaches it directly (clean
+    # preemption release). Without exec, bash is the signal target.
+    assert "exec /usr/bin/python3 -m subjob.worker" in script
 
 
 def test_render_script_with_idle_timeout():

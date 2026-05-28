@@ -29,7 +29,12 @@ SBATCH_TEMPLATE = """\
 set -euo pipefail
 
 # Worker uses SLURM_JOB_START_TIME + SLURM_JOB_TIMELIMIT for walltime awareness.
-{python} -m subjob.worker --pool "{pool_dir}" --cores {cores} {gpu_flag} {idle_flag}
+# `exec` REPLACES this shell with the worker so SLURM's SIGTERM (sent on
+# scancel / walltime end / preemption) is delivered directly to the worker
+# process — letting it catch the signal, kill in-flight tasks, and release
+# its claims cleanly. Without exec, bash is the signal target and the worker
+# is only reaped by the later SIGKILL, orphaning its claims.
+exec {python} -m subjob.worker --pool "{pool_dir}" --cores {cores} {gpu_flag} {idle_flag}
 """
 
 
