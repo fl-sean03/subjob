@@ -76,6 +76,43 @@ def test_commit_failed(tmp_path):
     assert t.state == "failed"
 
 
+def test_double_finalize_does_not_resurrect(tmp_path):
+    """commit_done then commit_failed on the SAME claim must leave the task in
+    done/ only — the stale second finalize is a no-op (Fix 1)."""
+    pool = Pool(tmp_path / "p")
+    pool.submit(_mktask("t1"))
+    claimed = pool.claim(pool.pending_paths()[0])
+    pool.commit_done(claimed, {"exit_code": 0})
+    # Stale re-finalize via the partial-failure path must NOT re-create the file.
+    pool.commit_failed(claimed, {"exit_code": 1})
+    assert pool.status() == {"pending": 0, "claimed": 0, "done": 1, "failed": 0}
+    assert (pool.done_dir / "t1.yaml").exists()
+    assert (pool.failed_dir / "t1.yaml").exists() is False
+
+
+def test_release_after_finalize_is_noop(tmp_path):
+    """release() on an already-finalized claim must return False and not
+    resurrect the task into pending/ (Fix 1)."""
+    pool = Pool(tmp_path / "p")
+    pool.submit(_mktask("t1"))
+    claimed = pool.claim(pool.pending_paths()[0])
+    pool.commit_done(claimed, {"exit_code": 0})
+    assert pool.release(claimed) is False
+    assert pool.status() == {"pending": 0, "claimed": 0, "done": 1, "failed": 0}
+    assert (pool.pending_dir / "t1.yaml").exists() is False
+
+
+def test_submit_accepts_dict_resources(tmp_path):
+    """pool.submit(Task(..., resources={...})) must not raise AttributeError
+    (Fix 4 — the AGENT_GUIDE example form)."""
+    pool = Pool(tmp_path / "p")
+    tid = pool.submit(Task(id="t1", command="echo hi", resources={"cores": 4}))
+    assert tid == "t1"
+    assert pool.status()["pending"] == 1
+    t = pool.read_task("pending", "t1")
+    assert t.resources.cores == 4
+
+
 def test_priority_ordering(tmp_path):
     pool = Pool(tmp_path / "p")
     pool.submit(Task(id="low", command="echo", priority=1))

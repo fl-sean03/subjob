@@ -223,6 +223,10 @@ class Pool:
         worker can see how many times this task has been released (used to
         cap infinite walltime-bounce — see Worker._dispatch_pending).
         """
+        # If the claim was already finalized (moved out of claimed/) by another
+        # path, do nothing — never re-create the file or resurrect the task.
+        if not claimed.path.exists():
+            return False
         task = claimed.task
         task.attempts = list(task.attempts) + [
             {"released": True, "reason": reason or "worker_shutdown"}
@@ -251,6 +255,11 @@ class Pool:
         self._finalize(claimed, "failed", "task_failed", payload)
 
     def _finalize(self, claimed: ClaimedTask, state: str, event_type: str, payload: dict) -> None:
+        # If the claim was already finalized (moved out of claimed/) by another
+        # path, do nothing — re-writing the file here would resurrect the task
+        # into a second state dir (or re-run it). The first finalize wins.
+        if not claimed.path.exists():
+            return
         task = claimed.task
         task.state = state
         task.attempts = list(task.attempts) + [payload]

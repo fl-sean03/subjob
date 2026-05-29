@@ -156,6 +156,57 @@ def test_worker_caps_release_attempts(tmp_path):
     assert "exceeded max_attempts" in failed.attempts[-1]["error"]
 
 
+def test_worker_survives_commit_failed_error(tmp_path):
+    """If commit_failed raises while reaping a crashed runner, the worker must
+    log and continue — not unwind the loop and leak other claims (Fix 2)."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    # One task whose runner will "crash", plus several that should still finish.
+    pool.submit(Task(id="crasher", command="echo boom", resources=Resources(cores=1)))
+    for i in range(3):
+        pool.submit(Task(id=f"ok{i}", command="echo done", resources=Resources(cores=1)))
+
+    worker = Worker(
+        pool,
+        Capabilities(cores=4, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=1.0,
+    )
+
+    # Force the crasher's runner future to raise, and make the resulting
+    # commit_failed blow up exactly once.
+    real_run_one = worker._run_one
+
+    def crashing_run_one(claim):
+        if claim.task.id == "crasher":
+            raise RuntimeError("simulated runner crash")
+        return real_run_one(claim)
+
+    worker._run_one = crashing_run_one
+
+    real_commit_failed = pool.commit_failed
+    state = {"raised": False}
+
+    def flaky_commit_failed(claim, payload):
+        if claim.task.id == "crasher" and not state["raised"]:
+            state["raised"] = True
+            raise OSError("simulated ENOSPC on finalize")
+        return real_commit_failed(claim, payload)
+
+    pool.commit_failed = flaky_commit_failed
+
+    worker.run()  # must not raise
+
+    assert state["raised"] is True
+    s = pool.status()
+    # The 3 good tasks still completed; the worker did not die mid-loop.
+    assert s["done"] == 3, s
+    # The crasher's claim was never resurrected; it stays in claimed/ (its
+    # finalize failed and was swallowed) — the key invariant is the worker
+    # survived and finished the others.
+    assert s["claimed"] == 1, s
+
+
 def test_runner_honors_workdir(tmp_path):
     from subjob.worker.runner import run_task
     sub = tmp_path / "sub"

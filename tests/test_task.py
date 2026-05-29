@@ -39,7 +39,7 @@ def test_write_read_roundtrip(tmp_path):
 
 @pytest.mark.parametrize(
     "bad_id",
-    ["", "../etc/passwd", "a b", "a/b", "a:b", "a" * 201, "$x"],
+    ["", "../etc/passwd", "a b", "a/b", "a:b", "a" * 201, "$x", ".", "..", "..."],
 )
 def test_reject_unsafe_ids(bad_id):
     with pytest.raises(ValueError):
@@ -82,3 +82,33 @@ def test_workdir_round_trip():
 def test_workdir_default_empty():
     t = Task(id="t1", command="echo hi")
     assert t.workdir == ""
+
+
+def test_reject_nonpositive_walltime():
+    with pytest.raises(ValueError, match="walltime_seconds"):
+        Task(id="t1", command="echo hi", resources=Resources(walltime_seconds=0))
+    with pytest.raises(ValueError, match="walltime_seconds"):
+        Task(id="t1", command="echo hi", resources=Resources(walltime_seconds=-5))
+
+
+def test_reject_nonpositive_cores():
+    with pytest.raises(ValueError, match="cores"):
+        Task(id="t1", command="echo hi", resources=Resources(cores=0))
+    with pytest.raises(ValueError, match="cores"):
+        Task(id="t1", command="echo hi", resources=Resources(cores=-2))
+
+
+def test_resources_dict_coerced_and_roundtrips():
+    t = Task(id="t", command="echo hi", resources={"cores": 4, "walltime_seconds": 1800})
+    assert isinstance(t.resources, Resources)
+    assert t.resources.cores == 4
+    assert t.resources.walltime_seconds == 1800
+    back = Task.from_yaml(t.to_yaml())
+    assert back.to_dict() == t.to_dict()
+    assert back.resources.cores == 4
+
+
+def test_resources_dict_walltime_validation():
+    # The dict form must also be validated (coerced before the walltime check).
+    with pytest.raises(ValueError, match="walltime_seconds"):
+        Task(id="t", command="echo hi", resources={"cores": 1, "walltime_seconds": 0})

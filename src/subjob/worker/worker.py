@@ -225,7 +225,12 @@ class Worker:
                 f.result()  # surface any unexpected exception in the runner
             except Exception as e:
                 log.exception("runner crashed for task %s", claim.task.id)
-                self.pool.commit_failed(claim, {"error": f"runner crashed: {e}"})
+                # A finalize failure (ENOSPC, missing dir, etc.) must not unwind
+                # the loop and leak every other in-flight claim — survive it.
+                try:
+                    self.pool.commit_failed(claim, {"error": f"runner crashed: {e}"})
+                except Exception:
+                    log.exception("commit_failed raised for task %s; continuing", claim.task.id)
 
     def _run_one(self, claim: ClaimedTask) -> None:
         self.pool.emit("task_started", claim.task.id, {"host": self.caps.host})

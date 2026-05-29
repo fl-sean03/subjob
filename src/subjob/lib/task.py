@@ -67,6 +67,21 @@ class Task:
         validate_id(self.id)
         if not self.command or not self.command.strip():
             raise ValueError(f"task {self.id!r}: command must be non-empty")
+        # Accept the dict form used throughout AGENT_GUIDE examples, e.g.
+        # Task(..., resources={"cores": 4}) — coerce before validating so the
+        # first to_yaml() doesn't hit 'dict has no attribute to_dict'.
+        if isinstance(self.resources, dict):
+            self.resources = Resources.from_dict(self.resources)
+        if self.resources.walltime_seconds <= 0:
+            raise ValueError(
+                f"task {self.id!r}: resources.walltime_seconds must be > 0 "
+                f"(got {self.resources.walltime_seconds})"
+            )
+        if self.resources.cores <= 0:
+            raise ValueError(
+                f"task {self.id!r}: resources.cores must be > 0 "
+                f"(got {self.resources.cores})"
+            )
         if not self.created_at:
             self.created_at = _iso_now()
 
@@ -135,6 +150,9 @@ def validate_id(task_id: str) -> None:
             f"task id {task_id!r} must match {ID_PATTERN.pattern} "
             "(filesystem-safe characters only)"
         )
+    if task_id.strip(".") == "":
+        # "." / ".." / "..." are filesystem-confusing (e.g. "..yaml") — reject.
+        raise ValueError(f"task id {task_id!r} must not be all dots")
 
 
 def _iso_now() -> str:
