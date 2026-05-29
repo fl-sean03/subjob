@@ -386,6 +386,95 @@ task, single-node MPI task, real research binaries (module chain), and
 multi-week pool growth/archival. These have code paths but no real-hardware
 end-to-end run yet.
 
+### Tier IX — Agent ergonomics & composed end-to-end flow
+
+**Why:** the core mechanics are validated, but `docs/AGENT_GUIDE.md`
+advertises a Pool API that is ~half-fictional — an agent following the
+guide calls `pool.ensure_workers(...)` / `pool.follow_until_done(...)` and
+crashes. This tier closes the doc-vs-reality gap with the minimal
+ergonomics layer (thin wrappers over already-tested primitives) and then
+runs the **full intended agent flow** end-to-end on real SLURM — something
+no prior tier did (they drove the low-level API directly).
+
+#### Code to build (Phase 0.5 — wrappers only, no Phase-1 features)
+
+1. **`Pool.follow_until_done(timeout_s=None, poll_interval=2.0) -> dict`**
+   Block until `status()` shows `pending == 0 and claimed == 0`; return the
+   final status. Raise `TimeoutError` if `timeout_s` elapses with work
+   outstanding. (Polls `status()` — no journal scan.)
+
+2. **`Pool.follow_until_state(state, task_ids, timeout_s=None, poll_interval=2.0) -> bool`**
+   Block until every id in `task_ids` is terminal (`done`/`failed`); return
+   True iff all landed in `state`. Raise `TimeoutError` on timeout. Enables
+   the Bayesian-opt pattern in AGENT_GUIDE.
+
+3. **`backends/local.py` — `LocalBackend`** implementing the `Backend`
+   protocol: `submit_worker(...)` spawns `python -m subjob.worker` as a
+   subprocess (records the PID, passes `--idle-timeout`); `count_workers()`
+   returns how many of its spawned PIDs are still alive; `status`/`cancel`
+   operate on PIDs. Needed so `ensure_workers(backend="local")` works in
+   tests without SLURM.
+
+4. **`Backend.count_workers(pool_dir) -> int`** added to the protocol.
+   `SlurmBackend.count_workers` derives a deterministic per-pool job name
+   `subjob-<sha1(pool_dir)[:8]>`, sets it via `#SBATCH --job-name`, and
+   counts live workers with `squeue -h -u $USER -n <name> | wc -l`. (The
+   sbatch template's job-name becomes pool-derived.)
+
+5. **`Pool.ensure_workers(backend, count, **worker_kwargs) -> list[WorkerHandle]`**
+   `backend` may be a `Backend` instance or the string `"slurm"`/`"local"`
+   (resolved via a small `backends.make_backend(name)` factory). Computes
+   `shortfall = max(0, count - backend.count_workers(pool))` and submits
+   that many workers. Honest "ensure up to count" — documented that in
+   Phase 0 liveness is best-effort (SLURM: queue/running count; local:
+   tracked PIDs).
+
+6. **`subjob failures` CLI subcommand** (read-only triage, NO priors —
+   distinct from the Phase-1 `diagnose`). `--pool` lists every task in
+   `failed/` with `{task_id, exit_code, walltime_killed, error,
+   stderr_tail}`; `--task-id X` shows one in full incl. `command` and a
+   larger stderr tail. JSON by default.
+
+7. **Fix `docs/AGENT_GUIDE.md`** to match reality: real `ensure_workers` /
+   `follow_until_done` / `follow_until_state` signatures and a worked
+   example that actually runs; move `diagnose` / `read_artifact` into an
+   explicit **"Phase 1 — not yet implemented"** subsection; replace the
+   failure-handling section's `pool.diagnose` with `subjob failures`.
+
+#### Unit tests (must pass locally, in the pytest suite)
+
+- `follow_until_done`: returns when drained; raises `TimeoutError` when stuck.
+- `follow_until_state`: returns True when all reach `done`; False when one fails.
+- `LocalBackend`: `submit_worker` drains a tiny pool; `count_workers`
+  reflects spawned/exited PIDs.
+- `ensure_workers(backend=local_instance, count=N)`: submits exactly the
+  shortfall; a second call with workers already running submits fewer/none.
+- `SlurmBackend._job_name` deterministic per pool; `render_script` includes
+  the pool-derived `--job-name`.
+- `subjob failures`: JSON lists the failed tasks with exit codes + stderr tails.
+
+#### Tier IX.E2E — composed agent flow on real SLURM (Alpine)
+
+Mirrors the canonical AGENT_GUIDE fan-out, using ONLY the public API:
+
+```python
+pool = Pool("/scratch/.../pools/tier9-<ts>")
+ids = pool.submit_batch([... 18 ok + 2 deliberately-failing tasks ...])
+pool.ensure_workers(backend="slurm", count=2, cores=4,
+                    partition="amilan", qos="normal", idle_timeout_seconds=20)
+final = pool.follow_until_done(timeout_s=1800)
+```
+Then `subjob failures --pool ...` must surface exactly the 2 failures.
+
+**Gates:** 18 in `done/`, 2 in `failed/`; `ensure_workers` returned 2 real
+SLURM job ids on different/same nodes; `follow_until_done` returned the
+final status (didn't time out); `failures` JSON lists exactly the 2 failed
+ids with correct exit codes. No double-claims.
+
+**Pass criterion:** the entire flow runs from the public API with zero
+manual `sbatch`/`squeue`, and the failures triage is accurate. This is the
+"an agent could actually drive this from the guide" proof.
+
 ---
 
 ## 5. Aggregate pass criteria — "Phase 0 fully validated"
