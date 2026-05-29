@@ -66,7 +66,8 @@ subjob submit --pool /scratch/.../pool --task-file tasks.yaml
 
 # Status (JSON, machine-readable)
 subjob status --pool /scratch/.../pool --format json
-# → {"pending": 17, "claimed": 0, "running": 3, "done": 0, "failed": 0}
+# → {"pending": 17, "claimed": 3, "done": 0, "failed": 0}
+#   (claimed = in-flight; there is no separate "running" key)
 
 # Follow (stream events as JSONL)
 subjob follow --pool /scratch/.../pool --since-event-id 0

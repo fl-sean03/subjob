@@ -155,7 +155,7 @@ ids = pool.submit_batch([
 ])
 
 # Status
-print(pool.status())  # {pending: 17, claimed: 0, running: 3, done: 0, failed: 0}
+print(pool.status())  # {pending: 17, claimed: 3, done: 0, failed: 0}  (claimed = in-flight)
 
 # Wait for batch completion
 for event in pool.follow(timeout_s=3600):

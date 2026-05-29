@@ -17,6 +17,50 @@ Phase-1 optimization opportunity rather than a Phase-0 blocker.
 
 ---
 
+## Phase 0.5 — agent ergonomics thrust (2026-05-28, CONVERGED)
+
+Driven by the Autonomous Development Loop (`docs/AUTONOMOUS_DEV_LOOP.md`).
+Closed the AGENT_GUIDE doc-vs-reality gap so an agent can drive subjob
+straight from the guide.
+
+**Delivered:** `Pool.ensure_workers` / `follow_until_done` / `follow_until_state`,
+`LocalBackend`, `Backend.count_workers`, `make_backend`, `subjob failures`
+CLI; AGENT_GUIDE + README corrected (DAG/`depends_on`, `diagnose`,
+`read_artifact`, artifact-validation all fenced as Phase 1/2 — not pulled
+forward).
+
+**Tier IX.E2E (real Alpine SLURM):** 9/9 — full public-API fan-out
+(`submit_batch` → `ensure_workers` 2 sbatch workers → `follow_until_done`
+→ `failures` triage) ran end-to-end, 18 done / 2 failed, no double-claims,
+25s wall.
+
+**Loop trace:** implement → verify → Alpine E2E 9/9 → review R1 (2×P1) →
+fix → review R2 (1×P1 doc + 1×P1 regression caught in orchestrator
+verification) → fix → review R3 **CONVERGED** (no P0/P1). 107 tests, ruff
+clean.
+
+**Bugs the loop caught + fixed:**
+- P1 LocalBackend liveness in-memory-only → `ensure_workers("local")` leaked
+  workers; fixed with a pool-scoped, flock'd filesystem registry.
+- P1 `depends_on`/DAG advertised as working but unenforced (Phase 2) →
+  silently-wrong ordering for a guided agent; fixed docs (stage with
+  `follow_until_state`).
+- P1 **regression** (orchestrator-caught, masked by a racey unit test):
+  LocalBackend passing `--walltime-seconds 60` vs the 60s safety margin made
+  local workers exit instantly; fixed (local imposes no walltime) + tests
+  strengthened to assert the pool drains.
+- P2 process-group kill so forked children (mpirun) don't orphan on
+  preempt/walltime.
+
+### Cycle backlog (non-blocking, carry into the next audit cycle)
+- **P3 — tiny-walltime guard:** a worker given `walltime_seconds <=
+  walltime_safety_s` (60) exits doing zero work. Harmless for real
+  allocations (minutes–days); add a startup warn/clamp. (Reviewer R3.)
+- (F-001 pool-listing cache already mitigated; F-003 GPFS submission rate;
+  deferred real GPU/MPI/research-binary end-to-end — see below.)
+
+---
+
 ## Tier-by-tier results
 
 | Tier | Result | Backend | Where | Highlights |
