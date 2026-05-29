@@ -93,6 +93,47 @@ def test_reap_stale_moves_old_claims(tmp_path):
     assert pool.status()["claimed"] == 0
 
 
+def _fail_one_task(pool, task_id, command):
+    """Submit a failing task and drain it with an in-process worker."""
+    from subjob.worker.worker import Capabilities, Worker
+
+    pool.submit(Task(id=task_id, command=command))
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+
+
+def test_failures_lists_failed_tasks(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_one_task(pool, "boom", "exit 7")
+    assert pool.status()["failed"] == 1
+
+    r = _run(["failures", "--pool", str(tmp_path / "p")])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    assert parsed["failures"][0]["task_id"] == "boom"
+    assert parsed["failures"][0]["exit_code"] == 7
+
+
+def test_failures_single_task_includes_command(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_one_task(pool, "boom", "exit 7")
+
+    r = _run(["failures", "--pool", str(tmp_path / "p"), "--task-id", "boom"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    entry = parsed["failures"][0]
+    assert entry["command"] == "exit 7"
+    assert entry["exit_code"] == 7
+
+
 def test_reap_stale_respects_threshold(tmp_path):
     import os
     pool = Pool(tmp_path / "p")

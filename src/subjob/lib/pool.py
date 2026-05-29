@@ -308,6 +308,79 @@ class Pool:
                     out.append(ev)
         return out
 
+    def follow_until_done(
+        self,
+        timeout_s: float | None = None,
+        poll_interval: float = 2.0,
+    ) -> dict[str, int]:
+        """Block until no tasks remain pending or claimed; return final status().
+
+        Polls status() and sleeps poll_interval between checks. If timeout_s is
+        given and elapses while work is still outstanding (pending or claimed > 0),
+        raises TimeoutError carrying the last status snapshot.
+        """
+        end_at = (time.time() + timeout_s) if timeout_s is not None else None
+        while True:
+            status = self.status()
+            if status["pending"] == 0 and status["claimed"] == 0:
+                return status
+            if end_at is not None and time.time() >= end_at:
+                raise TimeoutError(f"timed out waiting for pool to drain: {status}")
+            time.sleep(poll_interval)
+
+    def follow_until_state(
+        self,
+        state: str,
+        task_ids: list[str],
+        timeout_s: float | None = None,
+        poll_interval: float = 2.0,
+    ) -> bool:
+        """Block until every id in task_ids is terminal (in done/ or failed/).
+
+        Returns True iff all ids ended up in the requested ``state`` dir.
+        Raises TimeoutError if timeout_s elapses before all ids are terminal.
+        """
+        wanted = set(task_ids)
+        end_at = (time.time() + timeout_s) if timeout_s is not None else None
+        while True:
+            done = {p.stem for p in self.list_state("done")}
+            failed = {p.stem for p in self.list_state("failed")}
+            terminal = done | failed
+            if wanted <= terminal:
+                target = done if state == "done" else failed
+                return wanted <= target
+            if end_at is not None and time.time() >= end_at:
+                outstanding = sorted(wanted - terminal)
+                raise TimeoutError(
+                    f"timed out waiting for {len(outstanding)} task(s) to reach a "
+                    f"terminal state: {outstanding}"
+                )
+            time.sleep(poll_interval)
+
+    def ensure_workers(self, backend: Any, count: int, **worker_kwargs: Any) -> list:
+        """Ensure at least ``count`` workers are running against this pool.
+
+        ``backend`` may be a Backend instance or the string "slurm"/"local"
+        (resolved via subjob.backends.make_backend). Submits only the shortfall
+        (count - currently-running) and returns the list of new WorkerHandles.
+
+        Phase-0 liveness is best-effort: ``count_workers`` reflects what the
+        backend can observe (squeue for SLURM, live subprocesses for local) and
+        does not guarantee a worker is actually polling the pool yet.
+        """
+        if isinstance(backend, str):
+            # Lazy import to avoid any import-order surprises (backends import
+            # nothing from pool, but keep this defensive).
+            from subjob.backends import make_backend
+
+            backend = make_backend(backend)
+        running = backend.count_workers(str(self.root))
+        shortfall = max(0, count - running)
+        handles = []
+        for _ in range(shortfall):
+            handles.append(backend.submit_worker(pool_dir=str(self.root), **worker_kwargs))
+        return handles
+
     def follow(
         self,
         timeout_s: float | None = None,

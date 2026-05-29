@@ -7,6 +7,7 @@ Returns the SLURM job id.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -18,7 +19,7 @@ from subjob.backends.base import WorkerHandle, WorkerStatus
 
 SBATCH_TEMPLATE = """\
 #!/bin/bash
-#SBATCH --job-name=subjob-worker
+#SBATCH --job-name={job_name}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={cores}
@@ -105,6 +106,7 @@ class SlurmBackend:
         if gpus > 0:
             extras.append(f"#SBATCH --gres=gpu:{gpus}")
         return SBATCH_TEMPLATE.format(
+            job_name=self._job_name(pool_dir),
             cores=cores,
             time_str=_seconds_to_hms(walltime_seconds),
             log_dir=f"{pool_dir}/logs",
@@ -131,6 +133,28 @@ class SlurmBackend:
         if shutil.which("scancel") is None:
             raise RuntimeError("scancel not available")
         subprocess.run(["scancel", handle.job_id], check=True)
+
+    def count_workers(self, pool_dir: str) -> int:
+        """Count this pool's worker jobs in the queue (best-effort).
+
+        Matches by the per-pool job name so distinct pools don't collide.
+        Returns 0 when squeue is unavailable (e.g. off-cluster).
+        """
+        if shutil.which("squeue") is None:
+            return 0
+        user = os.environ.get("USER", "")
+        out = subprocess.run(
+            ["squeue", "-h", "-u", user, "-n", self._job_name(pool_dir), "-o", "%i"],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode != 0:
+            return 0
+        return sum(1 for line in out.stdout.splitlines() if line.strip())
+
+    @staticmethod
+    def _job_name(pool_dir: str) -> str:
+        return "subjob-" + hashlib.sha1(pool_dir.encode()).hexdigest()[:8]
 
     @staticmethod
     def _parse_sbatch_output(out: str) -> str:

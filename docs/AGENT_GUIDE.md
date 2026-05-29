@@ -40,7 +40,10 @@ task_ids = pool.submit_batch([
 ])
 
 # Make sure workers exist (sbatch them if not)
-pool.ensure_workers(backend="slurm", count=2, profile="amilan-c64-long")
+pool.ensure_workers(
+    backend="slurm", count=2, cores=64,
+    partition="amilan", qos="long", idle_timeout_seconds=600,
+)
 
 # Watch
 for event in pool.follow(timeout_s=24*3600):
@@ -49,9 +52,9 @@ for event in pool.follow(timeout_s=24*3600):
         case "task_done":
             print(f"  ✓ {event['task_id']}")
         case "task_failed":
-            diag = pool.diagnose(event["task_id"])
-            # diag includes prior-match if any, stdout/stderr tail, classifier verdict
-            print(f"  ✗ {event['task_id']}: {diag['classification']}")
+            t = pool.read_task("failed", event["task_id"])
+            last = t.attempts[-1] if t.attempts else {}
+            print(f"  ✗ {event['task_id']}: exit={last.get('exit_code')} {last.get('error')}")
 ```
 
 ## CLI (for Bash invocation from agents)
@@ -69,21 +72,24 @@ subjob status --pool /scratch/.../pool --format json
 subjob follow --pool /scratch/.../pool --since-event-id 0
 # → emits one JSON per line, blocking until terminated
 
-# Diagnose a failure
-subjob diagnose --pool /scratch/.../pool --task-id snap_005
-# → prints classification + suggested fix + log tails
+# Triage failures (read-only): exit codes, walltime-kill, error, stderr tail
+subjob failures --pool /scratch/.../pool
+# → {"failures": [{"task_id": "snap_005", "exit_code": 1, ...}], "count": 1}
 
-# Ensure workers exist
-subjob ensure-workers --pool /scratch/.../pool --backend slurm --count 2 \
-    --profile amilan-c64-long
+# Drill into one failed task (adds command + a longer stderr tail)
+subjob failures --pool /scratch/.../pool --task-id snap_005
 ```
 
 ## What an agent should do when a task fails
 
-1. Get the diagnosis: `subjob diagnose --pool $POOL --task-id $TID`
-2. If diagnosis matches a prior with auto-mitigation → already retried, just wait
-3. If diagnosis is a known prior without auto-mitigation → apply the suggested fix (or escalate to user if destructive)
-4. If diagnosis is "unknown failure" → catalog it in `simulations/.priors.yaml`, escalate to user
+1. Triage with the CLI: `subjob failures --pool $POOL` (all failures) or
+   `subjob failures --pool $POOL --task-id $TID` (one task, with command + longer stderr tail).
+2. For programmatic access from Python, list and read failed tasks directly:
+   `pool.list_state("failed")` returns the failed task paths, and
+   `pool.read_task("failed", id)` loads a `Task` whose `.attempts[-1]` holds the
+   last attempt's `exit_code` / `walltime_killed` / `error`.
+3. Decide a fix from the exit code + stderr tail, then re-submit a corrected task
+   (or escalate to the user if the fix is destructive or the cause is unknown).
 
 ## Common patterns
 
@@ -98,7 +104,7 @@ pool.submit_batch([
     for campaign in ["Pt100", "Pt111", "Pt110"]
     for snap in range(1, 21)
 ])
-pool.ensure_workers(backend="slurm", count=4, profile="amilan-c32-normal")
+pool.ensure_workers(backend="slurm", count=4, cores=32, partition="amilan", qos="normal")
 pool.follow_until_done()
 ```
 
@@ -113,7 +119,7 @@ run_tasks = [Task(id=f"run-{p}", command=f"namd3 ... --param {p}",
 analyze_tasks = [Task(id=f"analyze-{p}", command=f"...",
                       depends_on=[f"run-{p}"]) for p in params]
 pool.submit_batch(build_tasks + run_tasks + analyze_tasks)
-pool.ensure_workers(count=4)
+pool.ensure_workers(backend="slurm", count=4, cores=32, partition="amilan", qos="normal")
 pool.follow_until_done()
 ```
 
@@ -123,10 +129,13 @@ pool.follow_until_done()
 pool = Pool(...)
 initial = [Task(id=f"init-{i}", command=...) for i in range(5)]
 pool.submit_batch(initial)
-pool.follow_until_state("done", task_ids=[t.id for t in initial])
+initial_task_ids = [t.id for t in initial]
+pool.follow_until_state("done", task_ids=initial_task_ids)
 
-# Read results, decide next sample
-results = [pool.read_artifact(tid, "result.json") for tid in initial_task_ids]
+# Read results, decide next sample. Phase 0 has no artifact helper, so read
+# the result file the task wrote yourself (you control the command + path):
+import json
+results = [json.loads((scratch / tid / "result.json").read_text()) for tid in initial_task_ids]
 next_samples = bayes_opt.suggest(results)
 
 pool.submit_batch([Task(id=f"sample-{j}", command=...) for j in next_samples])
@@ -141,3 +150,15 @@ pool.submit_batch([Task(id=f"sample-{j}", command=...) for j in next_samples])
 - **No automatic restart on FATAL** unless `retry.max_attempts > 0` and prior matches
 - **Walltime is per-task** — if a task hits its declared walltime, worker kills it. Don't set generous values "just in case"; tighter is better.
 - **Workers exit at allocation walltime** — unfinished claims get released and re-queued. Plan for this if your worker allocation is 7 days but tasks are 12 hr.
+
+## Phase 1 — not yet implemented
+
+These APIs are planned but **do not exist yet**. They depend on the deferred
+priors + artifact-validation features and will land in Phase 1:
+
+- `pool.diagnose(task_id)` — classifier verdict + prior-match + suggested fix.
+  Until then, use `subjob failures` / `pool.read_task("failed", id)` for triage
+  (see "What an agent should do when a task fails" above).
+- `pool.read_artifact(task_id, name)` — validated read of a task's declared
+  artifact. Until then, read the result file your task wrote directly (you
+  control the command and output path).

@@ -39,8 +39,11 @@ class Backend(Protocol):
         walltime_seconds: int = 86400,
         partition: str | None = None,
         qos: str | None = None,
+        idle_timeout_seconds: float | None = None,
         extra_sbatch_args: list[str] | None = None,
     ) -> WorkerHandle: ...
+
+    def count_workers(self, pool_dir: str) -> int: ...
 
     def status(self, handle: WorkerHandle) -> WorkerStatus: ...
 

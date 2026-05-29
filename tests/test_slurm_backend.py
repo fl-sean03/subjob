@@ -70,3 +70,19 @@ def test_submit_worker_errors_when_sbatch_missing(tmp_path):
 
     with pytest.raises(RuntimeError, match="sbatch not found"):
         backend.submit_worker(pool_dir=str(tmp_path), cores=1)
+
+
+def test_job_name_deterministic_and_pool_specific():
+    a1 = SlurmBackend._job_name("/scratch/pool-a")
+    a2 = SlurmBackend._job_name("/scratch/pool-a")
+    b = SlurmBackend._job_name("/scratch/pool-b")
+    assert a1 == a2  # deterministic for the same pool dir
+    assert a1 != b  # differs by pool dir
+    assert a1.startswith("subjob-")
+
+
+def test_render_script_uses_per_pool_job_name():
+    backend = SlurmBackend(python_executable="/usr/bin/python3")
+    script = backend.render_script(pool_dir="/scratch/pool", cores=4, walltime_seconds=3600)
+    assert "#SBATCH --job-name=subjob-" in script
+    assert "#SBATCH --job-name=subjob-worker\n" not in script

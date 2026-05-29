@@ -69,6 +69,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_reap.set_defaults(func=cmd_reap_stale)
 
+    p_failures = sub.add_parser("failures", help="Summarize failed tasks (read-only triage)")
+    p_failures.add_argument("--pool", required=True)
+    p_failures.add_argument(
+        "--task-id",
+        default=None,
+        help="Inspect a single failed task in detail (includes command + longer stderr tail)",
+    )
+    p_failures.set_defaults(func=cmd_failures)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -174,6 +183,48 @@ def cmd_reap_stale(args) -> int:
             reaped.append({"task_id": p.stem, "error": str(e)})
     _emit(args.format, {"reaped": reaped, "count": len(reaped), "dry_run": args.dry_run})
     return 0
+
+
+def cmd_failures(args) -> int:
+    """Read-only triage of failed tasks: exit code, walltime-kill, error, stderr tail."""
+    pool = Pool(args.pool)
+    if args.task_id:
+        paths = [pool.failed_dir / f"{args.task_id}.yaml"]
+    else:
+        paths = pool.list_state("failed")
+    items = []
+    for p in paths:
+        if not p.exists():
+            continue
+        t = Task.read(p)
+        last = t.attempts[-1] if t.attempts else {}
+        err_path = pool.logs_dir / f"{t.id}.err"
+        tail_bytes = 8000 if args.task_id else 2000
+        entry = {
+            "task_id": t.id,
+            "exit_code": last.get("exit_code"),
+            "walltime_killed": last.get("walltime_killed"),
+            "error": last.get("error"),
+            "stderr_tail": _tail_bytes(err_path, tail_bytes),
+        }
+        if args.task_id:
+            entry["command"] = t.command
+        items.append(entry)
+    _emit(args.format, {"failures": items, "count": len(items)})
+    return 0
+
+
+def _tail_bytes(path: Path, n: int) -> str:
+    """Return the last n bytes of a file as text, or "" if absent/unreadable."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - n))
+            data = f.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
 
 
 def _emit(fmt: str, obj: dict) -> None:

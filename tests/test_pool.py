@@ -247,3 +247,53 @@ def test_release_attempt_count_accumulates(tmp_path):
         pool.release(claimed)
     t = Task.read(pool.pending_dir / "t1.yaml")
     assert pool.release_attempt_count(t) == 3
+
+
+def _drain_with_worker(pool, cores=2):
+    from subjob.worker.worker import Capabilities, Worker
+
+    Worker(
+        pool,
+        Capabilities(cores=cores, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+
+
+def test_follow_until_done_returns_when_drained(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit_batch([Task(id=f"t{i}", command="true") for i in range(3)])
+    _drain_with_worker(pool)
+    status = pool.follow_until_done(timeout_s=5, poll_interval=0.05)
+    assert status["pending"] == 0
+    assert status["claimed"] == 0
+    assert status["done"] == 3
+
+
+def test_follow_until_done_times_out_when_pending(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="stuck", command="echo hi"))
+    with pytest.raises(TimeoutError):
+        pool.follow_until_done(timeout_s=0.2, poll_interval=0.05)
+
+
+def test_follow_until_state_true_when_all_done(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    ids = [f"t{i}" for i in range(3)]
+    pool.submit_batch([Task(id=i, command="true") for i in ids])
+    _drain_with_worker(pool)
+    assert pool.follow_until_state("done", ids, timeout_s=5, poll_interval=0.05) is True
+
+
+def test_follow_until_state_false_when_one_failed(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="ok", command="true"))
+    pool.submit(Task(id="bad", command="exit 7"))
+    _drain_with_worker(pool)
+    # Both are terminal, but "bad" landed in failed/ → not all in done/
+    assert pool.follow_until_state("done", ["ok", "bad"], timeout_s=5, poll_interval=0.05) is False
+    assert pool.follow_until_state("failed", ["bad"], timeout_s=5, poll_interval=0.05) is True
