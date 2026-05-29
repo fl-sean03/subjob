@@ -60,6 +60,22 @@ def test_count_workers_reflects_alive_procs(tmp_path):
     backend.cancel(h2)
 
 
+def test_count_workers_is_pool_scoped(tmp_path):
+    """A worker spawned for pool A must not be counted against pool B."""
+    pool_a = Pool(tmp_path / "a")
+    pool_b = Pool(tmp_path / "b")
+    pool_a.init()
+    pool_b.init()
+    backend = LocalBackend()
+
+    h = backend.submit_worker(pool_dir=str(pool_a.root), cores=1, idle_timeout_seconds=2)
+    assert backend.count_workers(str(pool_a.root)) >= 1
+    # pool B has its own (absent) registry → zero.
+    assert backend.count_workers(str(pool_b.root)) == 0
+
+    backend.cancel(h)
+
+
 def test_status_unknown_for_untracked_pid(tmp_path):
     from subjob.backends.base import WorkerHandle
 

@@ -9,6 +9,7 @@ when its declared walltime won't fit in the remaining allocation.
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import subprocess
 import time
@@ -98,6 +99,7 @@ def run_task(
                 stderr=err,
                 env=env,
                 cwd=cwd,
+                start_new_session=True,  # own process group → kill forked children too
             )
             if on_spawn is not None:
                 on_spawn(proc)
@@ -127,7 +129,33 @@ def run_task(
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    """Best-effort kill: SIGTERM, brief wait, then SIGKILL."""
+    """Best-effort kill of the task's whole process group.
+
+    The task is spawned with ``start_new_session=True``, so it and any children
+    it forks (mpirun, ``cmd &``) share a process group. We signal the group so
+    forked children don't orphan. If the group is already gone or we can't
+    resolve it, fall back to signalling just the shell. Never raises.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+                proc.wait()
+            return
+        except (ProcessLookupError, OSError):
+            # Group already gone, or killpg unsupported — fall through.
+            pass
+
+    # Fallback: signal just the shell process.
     try:
         proc.terminate()
         try:
@@ -136,7 +164,7 @@ def _terminate(proc: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
         pass
 
 

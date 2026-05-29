@@ -166,6 +166,34 @@ def test_runner_honors_workdir(tmp_path):
     assert str(sub) in result.stdout_tail
 
 
+def test_walltime_kill_reaps_forked_children(tmp_path):
+    """A task that backgrounds a child must have that child killed too when the
+    task is walltime-killed (process-group kill, not just the shell)."""
+    marker = tmp_path / "CHILD_ALIVE"
+    cmd = f"(sleep 30 && touch {marker}) & echo parent; sleep 30"
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="forker", command=cmd, resources=Resources(walltime_seconds=2)))
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.1,
+        idle_timeout_s=2.0,
+    ).run()
+
+    s = pool.status()
+    assert s["failed"] == 1, s
+    failed = pool.read_task("failed", "forker")
+    assert failed.attempts[-1].get("walltime_killed") is True
+
+    # The backgrounded child should have been killed with the group; its marker
+    # (written after a 30s sleep) must NOT appear. Poll a few seconds to be sure.
+    end = time.time() + 4
+    while time.time() < end:
+        assert not marker.exists()
+        time.sleep(0.5)
+
+
 def test_worker_sigterm_releases_inflight_task(tmp_path):
     """SIGTERM to a worker mid-task must release the claim (not fail it) and
     not hang on the in-flight subprocess. Models SLURM preemption."""

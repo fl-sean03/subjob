@@ -184,6 +184,9 @@ class Worker:
                     )
                 continue
             with self._lock:
+                # No free cores at all → nothing more can be claimed this cycle.
+                if self._cores_free <= 0:
+                    break
                 if peek.resources.cores > self._cores_free:
                     continue
                 if peek.resources.gpus > self._gpus_free:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import time
 
 from subjob.backends import make_backend
@@ -14,15 +16,44 @@ def test_ensure_workers_submits_shortfall(tmp_path):
     pool.submit_batch([Task(id=f"t{i}", command="sleep 5") for i in range(2)])
 
     backend = LocalBackend()
-    first = pool.ensure_workers(backend, count=2, cores=1, idle_timeout_seconds=2)
+    first = pool.ensure_workers(
+        backend, count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
+    )
     assert len(first) == 2
 
-    # Both should still be alive (tasks sleep 5s) → no shortfall on second call.
-    second = pool.ensure_workers(backend, count=2, cores=1, idle_timeout_seconds=2)
-    assert len(second) <= 1  # tolerant: 0 if both alive, at most 1 if one finished
+    # Both should still be alive (tasks sleep 5s, idle 8s) → no shortfall.
+    second = pool.ensure_workers(
+        backend, count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
+    )
+    assert len(second) == 0
 
     for h in first + second:
         backend.cancel(h)
+
+
+def test_ensure_workers_idempotent_across_throwaway_instances(tmp_path):
+    """The string form builds a fresh backend each call; the filesystem
+    registry must still report the first call's workers as alive."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit_batch([Task(id=f"t{i}", command="sleep 5") for i in range(2)])
+
+    first = pool.ensure_workers(
+        "local", count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
+    )
+    assert len(first) == 2
+
+    # New throwaway backend instance — must read the registry, not in-memory state.
+    second = pool.ensure_workers(
+        "local", count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
+    )
+    assert len(second) == 0
+
+    for h in first:
+        try:
+            os.kill(int(h.job_id), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
 
 def test_ensure_workers_resolves_string_backend(tmp_path):
