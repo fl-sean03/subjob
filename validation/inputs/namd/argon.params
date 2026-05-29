@@ -1,0 +1,17 @@
+* Argon LJ parameters
+*
+
+BONDS
+
+ANGLES
+
+DIHEDRALS
+
+IMPROPER
+
+NONBONDED nbxmod 5 atom cdiel shift vatom vdistance vswitch -
+cutnb 14.0 ctofnb 12.0 ctonnb 10.0 eps 1.0 e14fac 1.0 wmin 1.5
+!atom  ignored  epsilon  Rmin/2
+AR     0.000000  -0.238000   1.910000
+
+END

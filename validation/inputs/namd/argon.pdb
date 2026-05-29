@@ -1,0 +1,9 @@
+ATOM      1 AR   AR  A   1       0.000   0.000   0.000  1.00  0.00      AR  AR
+ATOM      2 AR   AR  A   2       0.000   0.000   4.000  1.00  0.00      AR  AR
+ATOM      3 AR   AR  A   3       0.000   4.000   0.000  1.00  0.00      AR  AR
+ATOM      4 AR   AR  A   4       0.000   4.000   4.000  1.00  0.00      AR  AR
+ATOM      5 AR   AR  A   5       4.000   0.000   0.000  1.00  0.00      AR  AR
+ATOM      6 AR   AR  A   6       4.000   0.000   4.000  1.00  0.00      AR  AR
+ATOM      7 AR   AR  A   7       4.000   4.000   0.000  1.00  0.00      AR  AR
+ATOM      8 AR   AR  A   8       4.000   4.000   4.000  1.00  0.00      AR  AR
+END
