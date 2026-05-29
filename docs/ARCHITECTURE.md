@@ -144,6 +144,11 @@ Resource matching is dumb-but-correct: task asks for `cores: 64, gpus: 1` → wo
 
 ## Client (agent-facing)
 
+> **Design sketch — not all of this is implemented.** See `docs/AGENT_GUIDE.md`
+> for the real, current API. There is no `pool.failed()` (use
+> `pool.list_state("failed")`) and no `task.diagnosis()` / `subjob diagnose` —
+> `diagnose` and artifact helpers are Phase 1.
+
 ```python
 from subjob import Pool, Task
 

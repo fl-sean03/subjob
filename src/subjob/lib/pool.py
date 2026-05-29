@@ -274,7 +274,10 @@ class Pool:
     def emit(self, event_type: str, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "event_id": time.time_ns(),
+            # ns clock scaled up + per-PID salt: preserves time ordering while
+            # disambiguating same-ns emits from different processes sharing one
+            # journal (read_journal/follow still compare with strict `>`).
+            "event_id": time.time_ns() * 1000 + (os.getpid() % 1000),
             "type": event_type,
             "task_id": task_id,
             "payload": payload,

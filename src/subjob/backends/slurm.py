@@ -58,6 +58,7 @@ class SlurmBackend:
         idle_timeout_seconds: float | None = None,
         extra_sbatch_args: list[str] | None = None,
     ) -> WorkerHandle:
+        _validate_pool_dir(pool_dir)
         if shutil.which(self.sbatch_cmd) is None:
             raise RuntimeError(f"sbatch not found on PATH (looked for {self.sbatch_cmd!r})")
 
@@ -98,6 +99,10 @@ class SlurmBackend:
         qos: str | None = None,
         idle_timeout_seconds: float | None = None,
     ) -> str:
+        # `#SBATCH --output=` and the worker `--pool` arg interpolate pool_dir.
+        # SLURM directives can't be reliably quoted, so a pool_dir with
+        # whitespace/quotes would silently truncate the log path — reject it.
+        _validate_pool_dir(pool_dir)
         extras = []
         if partition:
             extras.append(f"#SBATCH --partition={partition}")
@@ -162,6 +167,14 @@ class SlurmBackend:
         if not m:
             raise RuntimeError(f"could not parse sbatch output: {out!r}")
         return m.group(1)
+
+
+def _validate_pool_dir(pool_dir: str) -> None:
+    """Reject pool_dirs that can't be safely interpolated into #SBATCH directives."""
+    if any(c.isspace() for c in pool_dir) or '"' in pool_dir:
+        raise ValueError(
+            f"pool_dir must not contain whitespace or quotes for the SLURM backend: {pool_dir!r}"
+        )
 
 
 def _seconds_to_hms(seconds: int) -> str:

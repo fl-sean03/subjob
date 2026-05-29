@@ -135,7 +135,13 @@ def cmd_cancel(args) -> int:
         return 0
     claimed = pool.claimed_dir / name
     if claimed.exists():
-        _emit(args.format, {"cancelled": args.task_id, "was_pending": False, "note": "task is already claimed; running worker not interrupted"})
+        _emit(
+            args.format,
+            {
+                "not_cancelled": args.task_id,
+                "reason": "task is already claimed; running worker not interrupted",
+            },
+        )
         return 2
     _emit(args.format, {"error": "task not found in pool", "task_id": args.task_id})
     return 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subjob.backends.slurm as slurm_mod
 from subjob.backends.slurm import SlurmBackend, _seconds_to_hms
 
 
@@ -79,6 +80,20 @@ def test_job_name_deterministic_and_pool_specific():
     assert a1 == a2  # deterministic for the same pool dir
     assert a1 != b  # differs by pool dir
     assert a1.startswith("subjob-")
+
+
+def test_count_workers_returns_zero_when_squeue_absent(monkeypatch):
+    backend = SlurmBackend()
+    monkeypatch.setattr(slurm_mod.shutil, "which", lambda _cmd: None)
+    assert backend.count_workers("/scratch/pool") == 0
+
+
+def test_render_script_rejects_pool_dir_with_space():
+    import pytest
+
+    backend = SlurmBackend(python_executable="/usr/bin/python3")
+    with pytest.raises(ValueError, match="must not contain whitespace or quotes"):
+        backend.render_script(pool_dir="/scratch/my pool", cores=4, walltime_seconds=3600)
 
 
 def test_render_script_uses_per_pool_job_name():

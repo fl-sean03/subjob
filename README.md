@@ -55,7 +55,7 @@ Inspired by [fl-sean03/allocation-scheduler](https://github.com/fl-sean03/alloca
 | `docs/ARCHITECTURE.md` | The full design decision record |
 | `docs/AGENT_GUIDE.md` | How agents use subjob (skill-friendly) |
 | `docs/DEVELOPMENT.md` | Phase plan (dogfood-driven, not speculative) |
-| `docs/BACKENDS.md` | SLURM / CCM / local execution backends |
+| `docs/DEPLOYMENT.md` | SLURM / CCM / local backends + operations |
 | `src/subjob/` | The code (Python stdlib only, like the upstream) |
 | `examples/` | Concrete use cases |
 | `.claude/skills/subjob-submit/` | Agent skill for submission |

@@ -334,3 +334,32 @@ def test_follow_until_state_false_when_one_failed(tmp_path):
     # Both are terminal, but "bad" landed in failed/ → not all in done/
     assert pool.follow_until_state("done", ["ok", "bad"], timeout_s=5, poll_interval=0.05) is False
     assert pool.follow_until_state("failed", ["bad"], timeout_s=5, poll_interval=0.05) is True
+
+
+def test_follow_until_state_times_out_when_never_terminal(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="stuck", command="echo hi"))  # no worker → stays pending
+    with pytest.raises(TimeoutError):
+        pool.follow_until_state("done", ["stuck"], timeout_s=0.5, poll_interval=0.05)
+
+
+def test_follow_until_done_times_out_with_no_worker(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="stuck", command="echo hi"))  # no worker → stays pending
+    with pytest.raises(TimeoutError):
+        pool.follow_until_done(timeout_s=0.5, poll_interval=0.05)
+
+
+def test_read_journal_skips_truncated_line_between_valid_events(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.emit("task_done", "a", {})
+    # Append a truncated, non-JSON line directly to the journal
+    with open(pool.journal_path, "a") as f:
+        f.write('{"event_id": 99, "type": "tas\n')
+    pool.emit("task_done", "b", {})
+    events = pool.read_journal()
+    assert [e["task_id"] for e in events] == ["a", "b"]
+    assert len(events) == 2

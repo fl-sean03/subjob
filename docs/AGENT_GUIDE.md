@@ -48,13 +48,12 @@ pool.ensure_workers(
 # Watch
 for event in pool.follow(timeout_s=24*3600):
     # event is a dict: {type, task_id, timestamp, payload}
-    match event["type"]:
-        case "task_done":
-            print(f"  ✓ {event['task_id']}")
-        case "task_failed":
-            t = pool.read_task("failed", event["task_id"])
-            last = t.attempts[-1] if t.attempts else {}
-            print(f"  ✗ {event['task_id']}: exit={last.get('exit_code')} {last.get('error')}")
+    if event["type"] == "task_done":
+        print(f"  ✓ {event['task_id']}")
+    elif event["type"] == "task_failed":
+        t = pool.read_task("failed", event["task_id"])
+        last = t.attempts[-1] if t.attempts else {}
+        print(f"  ✗ {event['task_id']}: exit={last.get('exit_code')} {last.get('error')}")
 ```
 
 ## CLI (for Bash invocation from agents)
