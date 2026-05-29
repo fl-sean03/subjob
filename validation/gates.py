@@ -172,6 +172,27 @@ def task_stdout_contains(task_id: str, substring: str) -> Gate:
 # ----- journal inspection -----
 
 
+def task_logfile_contains(task_id: str, substring: str, stream: str = "out") -> Gate:
+    """Check the FULL per-task log file (logs/<id>.out/.err), not the 4 KB
+    attempt stdout_tail. Needed for verbose real binaries (e.g. NAMD) whose
+    early output (a GPU probe line) scrolls past the truncated tail.
+    """
+
+    def gate(pool: Pool) -> GateResult:
+        path = pool.logs_dir / f"{task_id}.{stream}"
+        if not path.exists():
+            return GateResult(f"logfile_contains({task_id}.{stream})", False, "log file missing")
+        text = path.read_text(errors="replace")
+        ok = substring in text
+        return GateResult(
+            f"logfile_contains({task_id}.{stream})",
+            ok,
+            f"{'found' if ok else 'NOT found'}: {substring!r}",
+        )
+
+    return gate
+
+
 def journal_event_present(event_type: str, task_id: str | None = None) -> Gate:
     def gate(pool: Pool) -> GateResult:
         for ev in pool.read_journal():

@@ -107,8 +107,10 @@ def main(argv=None):
         # Real binary actually completed its run:
         G.task_stdout_contains("namd_argon_gpu", "End of program")(pool),
         G.task_stdout_contains("namd_argon_gpu", "NAMD_E2E_DONE")(pool),
-        # GPU passthrough: the task saw a CUDA device (nvidia-smi printed a GPU name)
-        G.task_stdout_contains("namd_argon_gpu", "CVD=")(pool),
+        # GPU passthrough: CUDA_VISIBLE_DEVICES reached the task + nvidia-smi
+        # saw a device. NAMD's output is verbose, so these head-of-output lines
+        # scroll past the 4 KB stdout_tail — check the FULL log file.
+        G.task_logfile_contains("namd_argon_gpu", "CVD=")(pool),
         G.GateResult("follow_until_done_no_timeout", not timed_out, f"timed_out={timed_out}, final={final}"),
     ]
     report.write(pool_root / "REPORT.md")
