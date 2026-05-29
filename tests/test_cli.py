@@ -187,6 +187,91 @@ def test_cancel_already_claimed_returns_not_cancelled(tmp_path):
     assert pool.status()["claimed"] == 1
 
 
+def _land_in_done(pool, task_id, *, age_days):
+    """Place a completed task YAML in done/ and backdate its mtime."""
+    import os
+    import time
+    pool.submit(Task(id=task_id, command="echo hi"))
+    src = pool.pending_dir / f"{task_id}.yaml"
+    dest = pool.done_dir / f"{task_id}.yaml"
+    os.rename(src, dest)
+    old = time.time() - age_days * 86400
+    os.utime(dest, (old, old))
+    return dest
+
+
+def test_archive_moves_old_done_tasks_gzipped(tmp_path):
+    import gzip
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _land_in_done(pool, "old", age_days=5)
+
+    r = _run(["archive", "--pool", str(tmp_path / "p"), "--older-than-days", "1"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    assert parsed["archived"] == ["old"]
+    assert parsed["dry_run"] is False
+    # Original removed from done/, gzipped copy lands in archive/
+    assert not (pool.done_dir / "old.yaml").exists()
+    gz = pool.root / "archive" / "old.yaml.gz"
+    assert gz.exists()
+    # The gzip is a valid, readable copy of the task YAML.
+    with gzip.open(gz, "rt") as f:
+        content = f.read()
+    assert "id: old" in content
+
+
+def test_archive_skips_recent_tasks(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _land_in_done(pool, "fresh", age_days=0)
+    r = _run(["archive", "--pool", str(tmp_path / "p"), "--older-than-days", "1"])
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["count"] == 0
+    assert (pool.done_dir / "fresh.yaml").exists()
+
+
+def test_archive_dry_run_moves_nothing(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _land_in_done(pool, "old", age_days=5)
+    r = _run(["archive", "--pool", str(tmp_path / "p"), "--older-than-days", "1", "--dry-run"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    assert parsed["dry_run"] is True
+    # Nothing moved.
+    assert (pool.done_dir / "old.yaml").exists()
+    assert not (pool.root / "archive").exists()
+
+
+def test_archive_include_failed(tmp_path):
+    import os
+    import time
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="boom", command="exit 1"))
+    dest = pool.failed_dir / "boom.yaml"
+    os.rename(pool.pending_dir / "boom.yaml", dest)
+    old = time.time() - 5 * 86400
+    os.utime(dest, (old, old))
+
+    # Without the flag, failed/ is untouched.
+    r1 = _run(["archive", "--pool", str(tmp_path / "p"), "--older-than-days", "1"])
+    assert json.loads(r1.stdout)["count"] == 0
+    assert dest.exists()
+
+    r2 = _run(
+        ["archive", "--pool", str(tmp_path / "p"), "--older-than-days", "1", "--include-failed"]
+    )
+    parsed = json.loads(r2.stdout)
+    assert parsed["count"] == 1
+    assert parsed["archived"] == ["boom"]
+    assert not dest.exists()
+    assert (pool.root / "archive" / "boom.yaml.gz").exists()
+
+
 def test_reap_stale_respects_threshold(tmp_path):
     import os
     pool = Pool(tmp_path / "p")

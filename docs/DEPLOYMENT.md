@@ -101,6 +101,14 @@ Pick `--older-than` > your longest task walltime so you never reap live work.
 - **Concurrent submitters:** `submit()` uses exclusive create (`os.link`),
   so two agents racing on the same task id → one wins, the other gets a
   clear duplicate-id error. No silent clobber.
+- **Cross-dir re-submit is only soft-guarded (low-probability TOCTOU):**
+  `submit()`'s exclusive `os.link` only protects against two concurrent
+  submitters clobbering an id in `pending/`. Re-submitting an id that is
+  already in `done/`/`failed/`/`claimed/` is caught by a soft existence
+  check (`_task_exists_anywhere`) with a check-then-act gap — a concurrent
+  finalize landing between the check and the link could in principle slip a
+  duplicate through. Task ids should be **unique by construction**; don't
+  re-use a terminal id within a live pool.
 - **Journal integrity:** appends are serialized with `flock` + single
   `os.write`; validated at 20 k events from 8 concurrent threads, zero
   torn lines. Readers also skip any unparseable line defensively.
@@ -120,7 +128,7 @@ Pick `--older-than` > your longest task walltime so you never reap live work.
 | **Pending pool size** | Worker poll cost is O(files in pending/) per cycle for the directory stat; parsed YAMLs are cached (F-001 fix). ~30 ms/poll at 5000 pending. | Comfortable to a few thousand pending. For 10k+, split into multiple pools. |
 | **Submission rate** | GPFS-metadata-bound: ~30 tasks/s on `/scratch` (vs ~2300/s on local tmpfs). Each submit ≈ 6 metadata ops. | 60-task dogfood = ~2 s. 5000 tasks = ~3 min of submit. Submit from a script, not interactively, for big batches. |
 | **Throughput** | ~4 tasks/s per 8-core worker on GPFS (metadata-bound, trivial tasks). Scales ~linearly with worker count (13/s at 8 workers). | For many short tasks, add workers rather than cores. Real multi-minute tasks are compute-bound, not metadata-bound — this only matters for very short tasks. |
-| **`logs/`, `done/`, `journal.jsonl` growth** | Unbounded — never rotated or archived. | For multi-week campaigns, periodically archive/rotate the pool (gzip `done/` + truncate journal), or cycle to a fresh pool. `read_journal()` loads the whole journal into memory — keep journals to ~100k events. |
+| **`logs/`, `done/`, `journal.jsonl` growth** | Unbounded — never rotated automatically. `subjob archive` gzips old `done/`/`failed/` YAMLs into `<pool>/archive/`; the journal stays a manual rotation step. | For multi-week campaigns, periodically run `subjob archive --pool <P> --older-than-days N [--include-failed]` (and separately truncate the journal), or cycle to a fresh pool. `read_journal()` loads the whole journal into memory — keep journals to ~100k events. |
 | **Disk / quota** | A task that fills the disk fails like any non-zero exit; a worker that can't write the journal/logs will error. No pre-flight quota check. | Watch `/scratch` quota during long campaigns. `/scratch` has retention — checkpoint long-lived pools to `/projects`. |
 | **Clock skew** | `event_id = time.time_ns()` per node; cross-node journal ordering assumes NTP-synced clocks (Alpine is). | Fine on a single cluster. Don't rely on journal ordering across clusters with unsynced clocks. |
 

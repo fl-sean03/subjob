@@ -102,6 +102,18 @@ def test_worker_walltime_budget_blocks_long_task(tmp_path):
     assert pool.status()["pending"] == 1
 
 
+def test_worker_warns_when_budget_under_safety_margin(tmp_path, caplog):
+    """A worker whose budget is <= its safety margin warns it will do no work."""
+    import logging
+
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    caps = Capabilities(cores=1, host="t", walltime_end=time.time() + 1.0)
+    with caplog.at_level(logging.WARNING, logger="subjob.worker"):
+        Worker(pool, caps, poll_interval=0.05, idle_timeout_s=0.2, walltime_safety_s=60.0).run()
+    assert any("no usable time" in r.message for r in caplog.records)
+
+
 def test_parse_slurm_timelimit():
     assert _parse_timelimit("60") == 60 * 60
     assert _parse_timelimit("1:30") == 90

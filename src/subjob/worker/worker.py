@@ -133,6 +133,21 @@ class Worker:
     def run(self) -> None:
         self.pool.init()
         self._install_signal_handlers()
+        # Surface the confusing zero-work case up front: if the allocation
+        # budget is already at/under the safety margin, the worker will exit
+        # "walltime budget exhausted" without claiming anything. Warn loudly
+        # rather than silently clamping — the operator likely mis-sized the
+        # allocation or the safety margin.
+        if self.caps.walltime_end is not None:
+            remaining = self.caps.walltime_end - time.time()
+            if remaining <= self.walltime_safety_s:
+                log.warning(
+                    "worker has no usable time: allocation budget (%.0fs remaining) "
+                    "is <= the walltime safety margin (%.0fs); it will exit without "
+                    "running any tasks",
+                    remaining,
+                    self.walltime_safety_s,
+                )
         self.pool.emit("worker_started", "", {"host": self.caps.host, "cores": self.caps.cores})
         self._executor = ThreadPoolExecutor(max_workers=max(self.caps.cores, 1))
         try:

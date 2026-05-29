@@ -38,13 +38,15 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")
 
 def loads(text: str) -> Any:
     """Parse YAML text. Returns a dict, list, scalar, or None."""
+    raw_lines = text.splitlines()
     lines = _prepare(text)
     if not lines:
         return None
-    value, idx = _parse_block(lines, 0, -1)
+    ctx = _Ctx(raw_lines)
+    value, idx = _parse_block(lines, 0, -1, ctx)
     # Anything left over at column 0 that we didn't consume is a structural error.
     while idx < len(lines):
-        ln_no, indent, content = lines[idx]
+        ln_no, indent, content, _ = lines[idx]
         raise ParseError(f"line {ln_no}: unexpected content at indent {indent}: {content!r}")
     return value
 
@@ -59,14 +61,30 @@ def dumps(obj: Any) -> str:
 # ---------- preprocessing ----------
 
 
-def _prepare(text: str) -> list[tuple[int, int, str]]:
-    """Strip blank/comment lines, return (line_no, indent, content) tuples.
-
-    Block scalar contents are NOT stripped here; we detect `|` during parsing
-    and slurp the following lines with their raw indentation preserved.
+class _Ctx:
+    """Carries the original (unstripped) source lines so the block-scalar
+    slurper can recover blank lines that fall *inside* a `|` block — `_prepare`
+    drops blanks for structure parsing, but a blank line within a literal block
+    is part of the value and must be preserved.
     """
-    out: list[tuple[int, int, str]] = []
-    for line_no, raw in enumerate(text.splitlines(), start=1):
+
+    __slots__ = ("raw_lines",)
+
+    def __init__(self, raw_lines: list[str]):
+        self.raw_lines = raw_lines
+
+
+def _prepare(text: str) -> list[tuple[int, int, str, int]]:
+    """Strip blank/comment lines, return (line_no, indent, content, raw_idx) tuples.
+
+    `raw_idx` is the 0-based index of the line within `text.splitlines()`, so a
+    later pass (block-scalar slurp) can re-consult the original lines including
+    blanks. Block scalar contents are NOT stripped here; we detect `|` during
+    parsing and slurp the following lines with their raw indentation preserved.
+    """
+    out: list[tuple[int, int, str, int]] = []
+    for raw_idx, raw in enumerate(text.splitlines()):
+        line_no = raw_idx + 1
         if "\t" in raw[: len(raw) - len(raw.lstrip(" \t"))]:
             raise ParseError(f"line {line_no}: tabs are not allowed for indentation")
         stripped = raw.lstrip(" ")
@@ -77,14 +95,14 @@ def _prepare(text: str) -> list[tuple[int, int, str]]:
         if stripped.startswith("&") or stripped.startswith("*"):
             raise ParseError(f"line {line_no}: anchors/aliases are not supported")
         indent = len(raw) - len(stripped)
-        out.append((line_no, indent, stripped))
+        out.append((line_no, indent, stripped, raw_idx))
     return out
 
 
 # ---------- parsing ----------
 
 
-def _parse_block(lines, i, parent_indent):
+def _parse_block(lines, i, parent_indent, ctx):
     """Parse a value at lines[i]. Returns (value, next_index).
 
     Mappings must be at indent > parent_indent. Block sequences may live at
@@ -93,21 +111,21 @@ def _parse_block(lines, i, parent_indent):
     """
     if i >= len(lines):
         return None, i
-    _, indent, content = lines[i]
+    _, indent, content, _ = lines[i]
     is_seq = content == "-" or content.startswith("- ")
     if is_seq:
         if indent < parent_indent:
             return None, i
-        return _parse_sequence(lines, i, indent)
+        return _parse_sequence(lines, i, indent, ctx)
     if indent <= parent_indent:
         return None, i
-    return _parse_mapping(lines, i, indent)
+    return _parse_mapping(lines, i, indent, ctx)
 
 
-def _parse_mapping(lines, i, indent):
+def _parse_mapping(lines, i, indent, ctx):
     result: dict[str, Any] = {}
     while i < len(lines):
-        ln_no, ln_indent, content = lines[i]
+        ln_no, ln_indent, content, _ = lines[i]
         if ln_indent < indent:
             break
         if ln_indent > indent:
@@ -120,19 +138,19 @@ def _parse_mapping(lines, i, indent):
         i += 1
         if rhs is None or rhs == "":
             # Value is on the following lines, deeper-indented, OR null.
-            value, i = _parse_block(lines, i, indent)
+            value, i = _parse_block(lines, i, indent, ctx)
         elif rhs in ("|", "|-", "|+"):
-            value, i = _slurp_block_scalar(lines, i, indent, chomp=rhs[1:])
+            value, i = _slurp_block_scalar(lines, i, indent, ctx, chomp=rhs[1:])
         else:
             value = _parse_scalar(rhs, ln_no)
         result[key] = value
     return result, i
 
 
-def _parse_sequence(lines, i, indent):
+def _parse_sequence(lines, i, indent, ctx):
     items: list[Any] = []
     while i < len(lines):
-        ln_no, ln_indent, content = lines[i]
+        ln_no, ln_indent, content, _ = lines[i]
         if ln_indent < indent:
             break
         if ln_indent > indent:
@@ -148,7 +166,7 @@ def _parse_sequence(lines, i, indent):
             raise ParseError(f"line {ln_no}: invalid sequence entry: {content!r}")
         i += 1
         if rest == "":
-            value, i = _parse_block(lines, i, indent)
+            value, i = _parse_block(lines, i, indent, ctx)
             items.append(value)
             continue
         # `- key: value` is a list-of-dicts opener.
@@ -156,16 +174,17 @@ def _parse_sequence(lines, i, indent):
             # Treat this rest as the first key of a mapping that lives at indent+2.
             # Simulate by injecting a synthetic line. We do this by recursing on a
             # subset: parse this single line plus any following lines whose indent
-            # is at least indent+2.
+            # is at least indent+2. Carry each line's raw_idx through so a block
+            # scalar inside the entry can still recover its blank lines.
             entry_indent = indent + 2
-            synth = [(ln_no, entry_indent, rest)]
+            synth = [(ln_no, entry_indent, rest, lines[i - 1][3])]
             # Collect continuation lines.
             while i < len(lines) and lines[i][1] >= entry_indent:
                 synth.append(lines[i])
                 i += 1
-            value, j = _parse_mapping(synth, 0, entry_indent)
+            value, j = _parse_mapping(synth, 0, entry_indent, ctx)
             if j != len(synth):
-                _, _, leftover = synth[j]
+                leftover = synth[j][2]
                 raise ParseError(f"line {ln_no}: malformed list-of-dicts entry near {leftover!r}")
             items.append(value)
             continue
@@ -174,31 +193,54 @@ def _parse_sequence(lines, i, indent):
     return items, i
 
 
-def _slurp_block_scalar(lines, i, key_indent, chomp=""):
-    """Collect raw lines indented deeper than `key_indent` for a block scalar.
+def _slurp_block_scalar(lines, i, key_indent, ctx, chomp=""):
+    """Collect lines indented deeper than `key_indent` for a block scalar.
 
-    Preserves newlines, strips the leading common indent. The `chomp` indicator
-    controls the trailing newline (matching the emitter's chomping choice):
+    Preserves newlines AND blank lines that fall inside the block, stripping the
+    leading common indent. We walk the ORIGINAL source lines (`ctx.raw_lines`),
+    not the blank-stripped prepared lines, so a blank line inside a literal block
+    (e.g. an error traceback with a blank line) survives round-trips. A blank
+    line counts as part of the block when more block content follows it at the
+    block indent; trailing blank lines are removed and the chomp indicator then
+    governs the final newline:
       ""  (`|`)  → clip:  keep exactly one trailing "\\n"
       "-" (`|-`) → strip: no trailing newline
-      "+" (`|+`) → keep:  treated as clip here (Phase-0: we never emit `|+`,
-                   and our blocks don't carry trailing blank lines to keep).
+      "+" (`|+`) → keep:  treated as clip here (Phase-0: we never emit `|+`).
     """
     if i >= len(lines):
-        return "", i
+        # No content line follows the `|` header at all → empty block.
+        return ("" if chomp == "-" else "\n"), i
     # The block's indent is whatever the first content line has.
     block_indent = lines[i][1]
     if block_indent <= key_indent:
-        return "", i
+        return ("" if chomp == "-" else "\n"), i
+    start_raw = lines[i][3]
+    raw = ctx.raw_lines
     chunks: list[str] = []
-    while i < len(lines):
-        ln_no, ln_indent, content = lines[i]
+    pending_blanks = 0  # blank lines seen but not yet committed (may be trailing)
+    last_raw = start_raw - 1
+    r = start_raw
+    while r < len(raw):
+        line = raw[r]
+        stripped = line.lstrip(" ")
+        if stripped == "":
+            # Blank line: defer it — only keep it if real block content follows.
+            pending_blanks += 1
+            r += 1
+            continue
+        ln_indent = len(line) - len(stripped)
         if ln_indent < block_indent:
-            break
-        # `content` already has its leading whitespace stripped; rebuild with
-        # the extra-indent (relative to block_indent) preserved.
+            break  # dedent ends the block; deferred blanks are trailing → drop
+        # Real block content: flush any deferred interior blanks first.
+        chunks.extend([""] * pending_blanks)
+        pending_blanks = 0
         extra = ln_indent - block_indent
-        chunks.append(" " * extra + content)
+        chunks.append(" " * extra + stripped.rstrip("\n"))
+        last_raw = r
+        r += 1
+    # Advance the prepared-lines cursor past every line we consumed (those whose
+    # raw_idx falls at or before the last content line we took).
+    while i < len(lines) and lines[i][3] <= last_raw:
         i += 1
     body = "\n".join(chunks)
     if chomp == "-":
@@ -358,7 +400,10 @@ def _emit(value, indent, out, is_root=False, after_dash=False):
                     body = v
                 out.append(f"{prefix}{k}: {header}")
                 for ln in body.split("\n"):
-                    out.append(f"{pad}  {ln}")
+                    # Emit interior blank lines as truly empty (no trailing
+                    # whitespace) — the slurper treats any all-spaces line as a
+                    # block blank, so this round-trips and stays lint-clean.
+                    out.append(f"{pad}  {ln}" if ln else "")
             else:
                 out.append(f"{prefix}{k}: {_emit_scalar(v)}")
     elif isinstance(value, list):

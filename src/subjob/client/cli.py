@@ -7,8 +7,10 @@ text` for humans.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -81,6 +83,29 @@ def main(argv: list[str] | None = None) -> int:
         help="List what would be reaped without moving anything",
     )
     p_reap.set_defaults(func=cmd_reap_stale)
+
+    p_archive = sub.add_parser(
+        "archive",
+        help="Gzip-archive old terminal task YAMLs out of done/ (and optionally failed/)",
+    )
+    p_archive.add_argument("--pool", required=True)
+    p_archive.add_argument(
+        "--older-than-days",
+        type=float,
+        required=True,
+        help="Archive task YAMLs whose file mtime is older than this many days",
+    )
+    p_archive.add_argument(
+        "--include-failed",
+        action="store_true",
+        help="Also archive failed/ tasks (default: done/ only)",
+    )
+    p_archive.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be archived without moving anything",
+    )
+    p_archive.set_defaults(func=cmd_archive)
 
     p_failures = sub.add_parser("failures", help="Summarize failed tasks (read-only triage)")
     p_failures.add_argument("--pool", required=True)
@@ -206,6 +231,59 @@ def cmd_reap_stale(args) -> int:
         except (OSError, ValueError) as e:
             reaped.append({"task_id": p.stem, "error": str(e)})
     _emit(args.format, {"reaped": reaped, "count": len(reaped), "dry_run": args.dry_run})
+    return 0
+
+
+def cmd_archive(args) -> int:
+    """Gzip-archive old terminal task YAMLs to keep the pool from growing forever.
+
+    Moves task YAMLs in done/ (and failed/ with --include-failed) whose file
+    mtime is older than --older-than-days into <pool>/archive/ as <id>.yaml.gz.
+    The journal is deliberately left untouched — readers tail it, so journal
+    rotation stays a documented manual step (see DEPLOYMENT.md §4).
+    """
+    pool = Pool(args.pool)
+    archive_dir = pool.root / "archive"
+    cutoff = time.time() - args.older_than_days * 86400
+    src_dirs = [pool.done_dir]
+    if args.include_failed:
+        src_dirs.append(pool.failed_dir)
+    archived: list[str] = []
+    if not args.dry_run:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    for d in src_dirs:
+        if not d.exists():
+            continue
+        for p in sorted(d.iterdir()):
+            if p.suffix != ".yaml":
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if mtime >= cutoff:
+                continue
+            if args.dry_run:
+                archived.append(p.stem)
+                continue
+            dest = archive_dir / f"{p.name}.gz"
+            try:
+                with open(p, "rb") as src, gzip.open(dest, "wb") as gz:
+                    shutil.copyfileobj(src, gz)
+                os.unlink(p)
+            except OSError:
+                # Clean up a half-written archive so a re-run can retry.
+                try:
+                    if dest.exists():
+                        os.unlink(dest)
+                except OSError:
+                    pass
+                continue
+            archived.append(p.stem)
+    _emit(
+        args.format,
+        {"archived": archived, "count": len(archived), "dry_run": args.dry_run},
+    )
     return 0
 
 

@@ -132,6 +132,42 @@ def test_task_multiline_command_no_newline_roundtrips():
     assert back.command == "cd /tmp && \\\n  echo hi"
 
 
+def test_blank_line_inside_block_scalar_roundtrips():
+    """A blank line *inside* a literal block scalar must survive (no compaction)."""
+    obj = {"x": "a\n\nb"}
+    text = yaml_lite.dumps(obj)
+    assert yaml_lite.loads(text) == obj
+
+
+def test_blank_line_inside_block_scalar_with_trailing_newline_roundtrips():
+    obj = {"x": "a\n\nb\n"}
+    text = yaml_lite.dumps(obj)
+    assert yaml_lite.loads(text) == obj
+
+
+def test_task_command_with_blank_line_roundtrips():
+    """A Task whose command contains a blank line round-trips exactly."""
+    from subjob.lib.task import Task
+
+    t = Task(id="ml", command="line one\n\nline three")
+    back = Task.from_yaml(t.to_yaml())
+    assert back.command == "line one\n\nline three"
+
+
+def test_blank_line_between_top_level_keys_still_ignored():
+    """A blank line between top-level mapping keys is NOT block content."""
+    text = "x: 1\n\ny: 2\n"
+    assert yaml_lite.loads(text) == {"x": 1, "y": 2}
+
+
+def test_block_scalar_blank_line_in_list_of_dicts_roundtrips():
+    """Blank-line preservation also works for a block scalar nested in a
+    list-of-dicts entry (the synthetic-line path)."""
+    obj = {"attempts": [{"id": "a", "error": "boom\n\ntrace"}]}
+    text = yaml_lite.dumps(obj)
+    assert yaml_lite.loads(text) == obj
+
+
 def test_rejects_tabs():
     with pytest.raises(yaml_lite.ParseError, match="tab"):
         yaml_lite.loads("a:\n\tb: 1")
