@@ -61,6 +61,51 @@ clean.
 
 ---
 
+## Cycle 1 — full-platform audit (2026-05-28, CONVERGED)
+
+First outer-loop audit cycle under the ADL (`docs/AUTONOMOUS_DEV_LOOP.md`).
+Two parallel auditors → triage → fix thrusts → re-audit until 0 P0/P1.
+
+**Initial audit:** 1 P0, 4 P1, 7 P2 (scope clean per both auditors).
+**Re-audit #1:** 0 P0, 4 P1, 4 P2 (P0 fix held; new + one self-inflicted P1).
+**Re-audit #2:** **CONVERGED — 0 P0, 0 P1** (one P2 remains).
+
+**Bugs the cycle caught + fixed (131 tests, ruff clean):**
+- **P0 — finalize/release resurrection.** `write_text` re-created an
+  already-moved claim → a task could land in two state dirs / be re-run.
+  Fixed: no-op when the claimed file is gone (first finalize wins).
+- **P1 — `_reap_finished` unguarded** → a finalize error killed the worker
+  and leaked all in-flight claims. Wrapped.
+- **P1 — walltime-expiry mis-finalized healthy tasks as FAILED** instead of
+  releasing them (the earlier Alpine test only covered the scancel/SIGTERM
+  path). Now sets `_shutdown` before the walltime break.
+- **P1 — `Task(resources={...})` crashed** (dict not coerced) — the form
+  every AGENT_GUIDE example uses. Now coerced in `__post_init__`.
+- **P1 — `walltime_seconds<=0` ran unbounded.** Rejected at validation.
+- **P1 — throughput gate 1000× miscalibrated** by a self-inflicted event_id
+  change (Thrust-3 D6). Reverted event_id to `time.time_ns()`.
+- **P1 — `cmd_submit` dumped raw tracebacks** on bad `--task-file`. Now
+  JSON `{"error":...}` + exit 1 (across submit/cancel/failures/reap-stale).
+- **P1 — yaml_lite multi-line round-trip** added/dropped a trailing newline.
+  Fixed with `|-`/`|` chomp indicators.
+- P2s: validate id `.`/`..`; validate slurm partition/qos/extra newlines;
+  README dead links; cancel-key; ARCHITECTURE aspirational disclaimer;
+  documented reap-stale mtime-liveness + unclaimable-task `follow_until_done`
+  caveats.
+
+### Open backlog (P2/P3 — non-blocking, no P0/P1 remain)
+- **P2** — yaml_lite drops blank lines *inside* block scalars (`_prepare`
+  strips them before `_slurp_block_scalar`), so a stderr/error payload with
+  embedded blank lines (e.g. a traceback) round-trips compacted. Degrades
+  stored observability only; not work-unit correctness.
+- **P3** — tiny-walltime guard (worker with `walltime_seconds<=safety` does
+  zero work); event_id same-ns cross-node collision (accepted Phase-0).
+- **Deferred (need direction/decisions):** real research binaries on Alpine
+  (LAMMPS/GROMACS/QE/NAMD — module chain), GPU + MPI end-to-end, multi-week
+  pool growth/archival. DAG/priors/artifact-validation remain Phase-1/2.
+
+---
+
 ## Tier-by-tier results
 
 | Tier | Result | Backend | Where | Highlights |
