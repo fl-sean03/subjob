@@ -141,20 +141,31 @@ Pick `--older-than` > your longest task walltime so you never reap live work.
 
 ---
 
-## 5. Not yet validated (do before depending on them)
+## 5. Validation status (real hardware)
 
-These have code paths but haven't been run end-to-end on real hardware:
+**Validated end-to-end on Alpine:**
+- **Real MD binary + GPU passthrough** — NAMD3 ran a real LJ argon sim
+  through subjob on a real A100 (`atesting_a100`); the task received
+  `CUDA_VISIBLE_DEVICES` and saw the GPU (Tier X, `validation/RESULTS.md`).
+- **CPU partition** (`amilan`) — extensively, up to 1000 tasks × 8 nodes.
+- **Concurrency, preemption, recovery** — see RESULTS tiers + Cycle 1.
 
-- **GPU tasks actually using the GPU** — the worker passes
-  `CUDA_VISIBLE_DEVICES` through, but no real GPU workload has been run via
-  subjob on al40/aa100. Test one before a GPU campaign.
-- **MPI tasks inside a worker** (`mpirun -n N` within one allocation) —
-  architecturally a single worker is one node; multi-node MPI per task is
-  not supported. Single-node MPI should work but is untested.
-- **Real research binaries** (LAMMPS, GROMACS, QE, NAMD) — blocked on the
-  Alpine module-load chain; see `validation/PLAN.md § 6`. The standalone
-  NAMD3 binary at `/projects/sefl7948/software/...` is the easiest first
-  real-binary test.
+**Environment-blocked on Alpine (subjob dispatches them fine — the blocker
+is the cluster's software env, not subjob):**
+- **LAMMPS / GROMACS / Quantum ESPRESSO** — the CURC builds need a
+  module/shared-lib chain that didn't fully resolve; LAMMPS specifically
+  links a `libkim-api.so.2` that isn't installed. To run these, load the
+  correct modules inside the task `command` (subjob does not manage
+  modules) and confirm the binary runs standalone first.
+- **MPI inside a worker** (`mpirun -n N` within one allocation) —
+  `mpirun` is module-gated on Alpine (not on the default PATH); load the
+  MPI module in the task command. Architecturally a worker is one node, so
+  multi-node MPI per task is out of scope; single-node MPI should work once
+  the module env is set.
+
+**Phase 1/2 features** (DAG, priors/diagnose, artifact validation, CCM
+backend, heartbeats) are deliberately not implemented — see
+`validation/RESULTS.md` "Phase 1 / Phase 2" table.
 
 ---
 

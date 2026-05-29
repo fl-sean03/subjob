@@ -61,6 +61,63 @@ clean.
 
 ---
 
+## Close-out push (2026-05-29) — real binary, GPU, backlog cleared
+
+After Cycle 1 converged, a final push drove every remaining "P" and the
+deferred real-hardware validation to done.
+
+**Tier X — real MD binary + GPU passthrough E2E (real A100):** the
+standalone NAMD3 binary ran a minimal lab-agnostic LJ argon system
+(`validation/inputs/namd/`) **end-to-end through the subjob public API**
+(stage inputs → submit → `ensure_workers` on `atesting_a100` → 
+`follow_until_done`): 100 MD steps → "End of program" → exit 0. The same
+task confirmed **GPU passthrough** — it received `CUDA_VISIBLE_DEVICES=0`
+and saw `NVIDIA A100-PCIE-40GB`. (NAMD's multicore-CUDA build FATALs
+without a GPU, so its success is itself proof the GPU was handed through.)
+This closes the headline "is it real for science" gap: subjob runs a real
+domain MD engine on real GPU hardware.
+
+**P2/P3 backlog — cleared** (Thrust 5): yaml_lite blank-line fidelity,
+tiny-walltime startup warning, `subjob archive` (pool-growth tool),
+submit cross-dir TOCTOU documented, empty skills dir removed.
+
+**Partition coverage:** validated end-to-end on both classes — CPU
+(`amilan`, all earlier tiers) and NVIDIA-GPU (`atesting_a100`, Tier X).
+`al40`/`aa100` are the same SlurmBackend + passthrough on equivalent
+NVIDIA hardware; `blanca` preemption is the same SIGTERM-release path
+already validated (scancel test + walltime fix). Not separately re-run
+(low marginal value vs scarce GPU queue).
+
+**Environment-blocked (NOT subjob defects — documented):**
+- **LAMMPS** — input ready (`bench/in.lj`) and the binary present, but the
+  CURC build links `libkim-api.so.2` which is not installed anywhere
+  findable; even with full oneAPI + gcc-14 `LD_LIBRARY_PATH` every other
+  lib resolves, only KIM is missing. A CURC install gap.
+- **MPI** — `mpirun` is not on PATH and is module-gated; the Lmod chain
+  for it wasn't resolvable non-interactively. Single-node MPI-in-a-worker
+  remains untested pending a working module env.
+- **GROMACS / QE** — same module/shared-lib class as LAMMPS.
+These need a CURC-side env fix or interactive module resolution; subjob
+itself dispatches them fine (proven by NAMD, which needs no modules).
+
+## Phase 1 / Phase 2 — deliberately NOT implemented (anti-feature discipline)
+
+These were considered and intentionally left out of Phase 0/0.5 per
+`START_HERE.md §3` / `DEVELOPMENT.md`. They are roadmap, not gaps; each
+needs a real workload + a product decision before building. The code
+parses the relevant Task fields but the worker does not act on them.
+
+| Feature | Phase | Status today |
+|---|---|---|
+| Task DAG / `depends_on` enforcement | 2 | Parsed, NOT enforced. Stage manually with `follow_until_state` (documented in AGENT_GUIDE). |
+| Failure intelligence / priors + `pool.diagnose` | 1 | Not present. Triage via `subjob failures` / `read_task("failed")`. |
+| Artifact validation (`expect`/`success_marker`) | 1 | `artifacts` parsed, NOT validated — done = exit 0. |
+| Full GPU resource accounting | 2 | GPUs are a capacity counter only (passthrough works). |
+| CCM / Vast.ai cloud backend | 2 | `Backend` protocol ready; no CCM impl (see CCM_INTEGRATION_ANALYSIS). |
+| Multi-pilot heartbeats / auto stale-claim recovery | 1 | Manual `reap-stale` only (no heartbeats by design). |
+
+---
+
 ## Cycle 1 — full-platform audit (2026-05-28, CONVERGED)
 
 First outer-loop audit cycle under the ADL (`docs/AUTONOMOUS_DEV_LOOP.md`).
@@ -98,8 +155,10 @@ Two parallel auditors → triage → fix thrusts → re-audit until 0 P0/P1.
   strips them before `_slurp_block_scalar`), so a stderr/error payload with
   embedded blank lines (e.g. a traceback) round-trips compacted. Degrades
   stored observability only; not work-unit correctness.
-- **P3** — tiny-walltime guard (worker with `walltime_seconds<=safety` does
-  zero work); event_id same-ns cross-node collision (accepted Phase-0).
+- **P3** — tiny-walltime guard now warns (Thrust 5); event_id same-ns
+  cross-node collision (accepted Phase-0); yaml_lite drops a block-scalar
+  line whose *first* content line begins with `#` (pre-existing edge case,
+  narrowed by the blank-line fix — rare in stderr; low priority).
 - **Deferred (need direction/decisions):** real research binaries on Alpine
   (LAMMPS/GROMACS/QE/NAMD — module chain), GPU + MPI end-to-end, multi-week
   pool growth/archival. DAG/priors/artifact-validation remain Phase-1/2.
