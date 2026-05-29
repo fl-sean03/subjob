@@ -28,16 +28,24 @@ To preview the Phase 1 dogfood workload (60 Pt{100,111,110}-snap-* analysis task
 
 Submitting 100 short tasks as 100 separate `sbatch` jobs means waiting in the SLURM queue 100 times. `subjob` lets you submit one big allocation that internally cycles through tasks as cores free. One queue wait, then continuous work.
 
-Inspired by [fl-sean03/allocation-scheduler](https://github.com/fl-sean03/allocation-scheduler) but built up to lab-grade with:
+Inspired by [fl-sean03/allocation-scheduler](https://github.com/fl-sean03/allocation-scheduler) and built up to lab-grade.
+
+**Available now (Phase 0 / 0.5):**
 
 - Multi-pilot (multiple workers pull from one shared task pool — across nodes / partitions / clusters)
-- GPU resource accounting
-- Task DAG (depends_on)
-- Failure intelligence (priors-based mitigation)
-- Artifact validation (declared expects + success markers)
 - Event journaling (tailable JSONL for agents)
-- Cross-platform (SLURM today, CCM/Vast.ai later)
 - Agent-first API (Python module + structured JSON, not "edit a file")
+- Clean preemption (claims released + retried; forked children reaped)
+- Per-task walltime enforcement + release-retry cap + manual dead-worker recovery (`reap-stale`)
+- Basic resource gating (cores/GPUs as a capacity counter)
+
+**Planned (not yet implemented — see `docs/AGENT_GUIDE.md` "not yet implemented"):**
+
+- Task DAG / `depends_on` enforcement — *Phase 2*
+- Failure intelligence (priors-based mitigation) + `diagnose` — *Phase 1*
+- Artifact validation (declared expects + success markers) — *Phase 1*
+- Full GPU resource accounting — *Phase 2*
+- Cross-platform cloud backend (CCM / Vast.ai) — *Phase 2*
 
 ## Quick map
 

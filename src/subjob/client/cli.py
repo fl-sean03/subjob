@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 from subjob.lib.pool import Pool
@@ -127,8 +129,6 @@ def cmd_cancel(args) -> int:
         task.state = "failed"
         task.attempts = list(task.attempts) + [{"cancelled": True}]
         pending.write_text(task.to_yaml())
-        import os
-
         os.rename(pending, pool.failed_dir / name)
         pool.emit("task_cancelled", args.task_id, {})
         _emit(args.format, {"cancelled": args.task_id, "was_pending": True})
@@ -149,9 +149,6 @@ def cmd_reap_stale(args) -> int:
     older than --older-than is reaped. Use a threshold safely larger than your
     longest task's walltime so you don't reap live work.
     """
-    import os
-    import time
-
     pool = Pool(args.pool)
     now = time.time()
     reaped = []

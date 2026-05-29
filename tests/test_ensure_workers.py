@@ -13,22 +13,23 @@ from subjob.lib.task import Task
 def test_ensure_workers_submits_shortfall(tmp_path):
     pool = Pool(tmp_path / "p")
     pool.init()
-    pool.submit_batch([Task(id=f"t{i}", command="sleep 5") for i in range(2)])
+    pool.submit_batch([Task(id=f"t{i}", command="sleep 3") for i in range(2)])
 
     backend = LocalBackend()
-    first = pool.ensure_workers(
-        backend, count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
-    )
+    first = pool.ensure_workers(backend, count=2, cores=1, idle_timeout_seconds=5)
     assert len(first) == 2
 
-    # Both should still be alive (tasks sleep 5s, idle 8s) → no shortfall.
-    second = pool.ensure_workers(
-        backend, count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
-    )
-    assert len(second) == 0
+    # Give workers a moment to actually start running the tasks, then confirm
+    # the second call sees them alive (busy on sleep-3) → no shortfall. The
+    # short sleep here is what catches workers that exit immediately (e.g. a
+    # walltime/safety-margin regression) rather than staying to do work.
+    time.sleep(1.0)
+    second = pool.ensure_workers(backend, count=2, cores=1, idle_timeout_seconds=5)
+    assert len(second) == 0, "workers should still be alive doing work"
 
-    for h in first + second:
-        backend.cancel(h)
+    # And they must actually DO the work: the pool drains to done.
+    final = pool.follow_until_done(timeout_s=30, poll_interval=0.5)
+    assert final == {"pending": 0, "claimed": 0, "done": 2, "failed": 0}
 
 
 def test_ensure_workers_idempotent_across_throwaway_instances(tmp_path):
@@ -36,18 +37,16 @@ def test_ensure_workers_idempotent_across_throwaway_instances(tmp_path):
     registry must still report the first call's workers as alive."""
     pool = Pool(tmp_path / "p")
     pool.init()
-    pool.submit_batch([Task(id=f"t{i}", command="sleep 5") for i in range(2)])
+    pool.submit_batch([Task(id=f"t{i}", command="sleep 4") for i in range(2)])
 
-    first = pool.ensure_workers(
-        "local", count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
-    )
+    first = pool.ensure_workers("local", count=2, cores=1, idle_timeout_seconds=6)
     assert len(first) == 2
 
-    # New throwaway backend instance — must read the registry, not in-memory state.
-    second = pool.ensure_workers(
-        "local", count=2, cores=1, idle_timeout_seconds=8, walltime_seconds=60
-    )
-    assert len(second) == 0
+    # Let the workers start + begin their tasks, then a NEW throwaway backend
+    # instance must still see them alive via the filesystem registry.
+    time.sleep(1.0)
+    second = pool.ensure_workers("local", count=2, cores=1, idle_timeout_seconds=6)
+    assert len(second) == 0, "registry must report the first call's live workers"
 
     for h in first:
         try:

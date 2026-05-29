@@ -9,8 +9,8 @@ For Claude (or any agent) using subjob from a session.
 | Run 1 short task → produce 1 result | No, just sbatch |
 | Run 1 long task (12+ hr) → 1 result | No, just sbatch |
 | Run 5-500 short tasks (each < 1 hr) | **Yes** — queue overhead dominates without it |
-| Run 20-100 medium tasks (1-6 hr each) with diverse params | **Yes** — DAG + retry + diagnostic centralized |
-| Run a Bayesian-opt loop where next task depends on results | **Yes** — dynamic add-task, depends_on |
+| Run 20-100 medium tasks (1-6 hr each) with diverse params | **Yes** — centralized retry + triage (inter-stage ordering: stage manually with `follow_until_state`; `depends_on` DAG is Phase 2) |
+| Run a Bayesian-opt loop where next task depends on results | **Yes** — submit a batch, `follow_until_state`, read results, submit the next batch |
 | Run analysis pipeline across N snapshots | **Yes** — canonical pilot case |
 | Submit one big NAMD production run | No, just sbatch |
 
@@ -108,18 +108,30 @@ pool.ensure_workers(backend="slurm", count=4, cores=32, partition="amilan", qos=
 pool.follow_until_done()
 ```
 
-### Pattern: parameter sweep with DAG
+### Pattern: staged parameter sweep (build → run → analyze)
+
+> **`depends_on` is NOT enforced yet** (DAG is Phase 2 — see "not yet
+> implemented" below). A task carrying `depends_on` is parsed but the worker
+> will dispatch it as soon as a core is free, ignoring the dependency — which
+> runs dependents on absent inputs. **Until DAG lands, order stages yourself**
+> by draining one stage before submitting the next, with `follow_until_state`:
 
 ```python
 pool = Pool(...)
-build_tasks = [Task(id=f"build-{p}", command=f"build_system.py --param {p}",
-                    resources={"cores": 2}) for p in params]
-run_tasks = [Task(id=f"run-{p}", command=f"namd3 ... --param {p}",
-                  resources={"cores": 32}, depends_on=[f"build-{p}"]) for p in params]
-analyze_tasks = [Task(id=f"analyze-{p}", command=f"...",
-                      depends_on=[f"run-{p}"]) for p in params]
-pool.submit_batch(build_tasks + run_tasks + analyze_tasks)
 pool.ensure_workers(backend="slurm", count=4, cores=32, partition="amilan", qos="normal")
+
+build = [Task(id=f"build-{p}", command=f"build_system.py --param {p}",
+              resources={"cores": 2}) for p in params]
+pool.submit_batch(build)
+pool.follow_until_state("done", task_ids=[t.id for t in build])   # gate stage 1
+
+run = [Task(id=f"run-{p}", command=f"namd3 ... --param {p}",
+            resources={"cores": 32}) for p in params]
+pool.submit_batch(run)
+pool.follow_until_state("done", task_ids=[t.id for t in run])     # gate stage 2
+
+analyze = [Task(id=f"analyze-{p}", command="...") for p in params]
+pool.submit_batch(analyze)
 pool.follow_until_done()
 ```
 
@@ -151,14 +163,21 @@ pool.submit_batch([Task(id=f"sample-{j}", command=...) for j in next_samples])
 - **Walltime is per-task** — if a task hits its declared walltime, worker kills it. Don't set generous values "just in case"; tighter is better.
 - **Workers exit at allocation walltime** — unfinished claims get released and re-queued. Plan for this if your worker allocation is 7 days but tasks are 12 hr.
 
-## Phase 1 — not yet implemented
+## Not yet implemented (Phase 1 / Phase 2)
 
-These APIs are planned but **do not exist yet**. They depend on the deferred
-priors + artifact-validation features and will land in Phase 1:
+These are **parsed but not acted on**, or not present at all. Don't rely on
+them yet:
 
-- `pool.diagnose(task_id)` — classifier verdict + prior-match + suggested fix.
-  Until then, use `subjob failures` / `pool.read_task("failed", id)` for triage
-  (see "What an agent should do when a task fails" above).
-- `pool.read_artifact(task_id, name)` — validated read of a task's declared
-  artifact. Until then, read the result file your task wrote directly (you
-  control the command and output path).
+- **`depends_on` / task DAG — Phase 2.** A `Task` accepts `depends_on=[...]`
+  and it round-trips in the YAML, but the worker does **not** enforce it: a
+  dependent task is dispatched as soon as a core frees, regardless of whether
+  its dependencies are done. Order stages yourself with `follow_until_state`
+  (see "staged parameter sweep" above) until DAG lands.
+- `pool.diagnose(task_id)` — *Phase 1* — classifier verdict + prior-match +
+  suggested fix. Until then, use `subjob failures` / `pool.read_task("failed",
+  id)` for triage (see "What an agent should do when a task fails" above).
+- `pool.read_artifact(task_id, name)` — *Phase 1* — validated read of a task's
+  declared artifact. Until then, read the result file your task wrote directly
+  (you control the command and output path).
+- `artifacts={...}` on a Task is parsed but **not validated** (Phase 1) — a
+  task is "done" on exit code 0, not on artifact presence.

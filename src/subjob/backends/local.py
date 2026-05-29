@@ -1,8 +1,15 @@
 """Local backend — run workers as in-process subprocesses, no scheduler.
 
 For testing and single-node use. Spawns `python -m subjob.worker` against the
-pool and tracks the Popen handles so liveness can be polled. partition/qos/gpus
-are no-ops here.
+pool and tracks the Popen handles so liveness can be polled.
+
+No-ops here (no scheduler allocation exists locally):
+  - partition / qos — there is no queue.
+  - walltime_seconds — a local worker has no allocation deadline; it runs
+    until the pool drains or its idle-timeout elapses. (Passing a walltime
+    through would fight the worker's end-of-allocation safety margin and make
+    short-walltime workers exit immediately — so we deliberately don't.)
+gpus IS passed through (the worker uses it for resource gating).
 """
 
 from __future__ import annotations
@@ -13,6 +20,13 @@ import sys
 from pathlib import Path
 
 from subjob.backends.base import WorkerHandle, WorkerStatus
+
+try:
+    import fcntl  # POSIX advisory locking for the registry read-modify-write
+
+    _HAVE_FCNTL = True
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    _HAVE_FCNTL = False
 
 _REGISTRY_NAME = ".local_workers"
 
@@ -36,6 +50,8 @@ class LocalBackend:
         idle_timeout_seconds: float | None = None,
         extra_sbatch_args: list[str] | None = None,
     ) -> WorkerHandle:
+        # Note: walltime_seconds is intentionally NOT passed — a local worker
+        # has no allocation deadline and runs until idle-timeout / pool drain.
         cmd = [
             self.python_executable,
             "-m",
@@ -46,8 +62,6 @@ class LocalBackend:
             str(cores),
             "--idle-timeout",
             str(idle_timeout_seconds or 10),
-            "--walltime-seconds",
-            str(walltime_seconds),
             "--log-level",
             "WARNING",
         ]
@@ -57,9 +71,16 @@ class LocalBackend:
         self._procs.append(proc)
         # Record the PID in the pool-scoped registry so liveness survives fresh
         # backend instances (e.g. ensure_workers builds a throwaway backend).
+        # Locked so a concurrent count_workers() rewrite can't drop this PID.
         registry = Path(pool_dir) / _REGISTRY_NAME
         with open(registry, "a") as f:
-            f.write(f"{proc.pid}\n")
+            if _HAVE_FCNTL:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(f"{proc.pid}\n")
+            finally:
+                if _HAVE_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         return WorkerHandle(backend="local", job_id=str(proc.pid), metadata={"pool_dir": pool_dir})
 
     def count_workers(self, pool_dir: str) -> int:
@@ -76,19 +97,30 @@ class LocalBackend:
         registry = Path(pool_dir) / _REGISTRY_NAME
         if not registry.exists():
             return 0
-        living: list[int] = []
-        for line in registry.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        # Read-modify-write under an exclusive lock so a concurrent
+        # submit_worker() append isn't lost when we prune+rewrite.
+        with open(registry, "r+") as f:
+            if _HAVE_FCNTL:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
-                pid = int(line)
-            except ValueError:
-                continue
-            if _pid_alive(pid):
-                living.append(pid)
-        # Prune the registry to only-living PIDs.
-        registry.write_text("".join(f"{pid}\n" for pid in living))
+                living: list[int] = []
+                for line in f.read().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        pid = int(line)
+                    except ValueError:
+                        continue
+                    if _pid_alive(pid):
+                        living.append(pid)
+                # Prune the registry to only-living PIDs.
+                f.seek(0)
+                f.truncate()
+                f.write("".join(f"{pid}\n" for pid in living))
+            finally:
+                if _HAVE_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         return len(living)
 
     def status(self, handle: WorkerHandle) -> WorkerStatus:
