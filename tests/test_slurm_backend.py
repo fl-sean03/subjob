@@ -96,6 +96,20 @@ def test_render_script_rejects_pool_dir_with_space():
         backend.render_script(pool_dir="/scratch/my pool", cores=4, walltime_seconds=3600)
 
 
+def test_render_script_rejects_qos_with_newline():
+    """A qos containing a newline could inject arbitrary #SBATCH directives."""
+    import pytest
+
+    backend = SlurmBackend(python_executable="/usr/bin/python3")
+    with pytest.raises(ValueError, match="must not contain a newline or quote"):
+        backend.render_script(
+            pool_dir="/scratch/pool",
+            cores=4,
+            walltime_seconds=3600,
+            qos="long\n#SBATCH --account=victim",
+        )
+
+
 def test_render_script_uses_per_pool_job_name():
     backend = SlurmBackend(python_executable="/usr/bin/python3")
     script = backend.render_script(pool_dir="/scratch/pool", cores=4, walltime_seconds=3600)

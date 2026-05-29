@@ -85,6 +85,12 @@ subjob reap-stale --pool /scratch/.../pool --older-than 7200 --to failed
 
 Pick `--older-than` > your longest task walltime so you never reap live work.
 
+- **`reap-stale` uses file mtime as its only liveness signal** (Phase 0 has no
+  heartbeats). A task still legitimately running but older than `--older-than`
+  can be reaped and re-run *while the original is still executing* — set
+  `--older-than` comfortably above your longest task's walltime, and rely on
+  restart-safe commands (§1.1) to make a rare double-run harmless.
+
 ---
 
 ## 3. Concurrency & correctness guarantees
@@ -117,6 +123,13 @@ Pick `--older-than` > your longest task walltime so you never reap live work.
 | **`logs/`, `done/`, `journal.jsonl` growth** | Unbounded — never rotated or archived. | For multi-week campaigns, periodically archive/rotate the pool (gzip `done/` + truncate journal), or cycle to a fresh pool. `read_journal()` loads the whole journal into memory — keep journals to ~100k events. |
 | **Disk / quota** | A task that fills the disk fails like any non-zero exit; a worker that can't write the journal/logs will error. No pre-flight quota check. | Watch `/scratch` quota during long campaigns. `/scratch` has retention — checkpoint long-lived pools to `/projects`. |
 | **Clock skew** | `event_id = time.time_ns()` per node; cross-node journal ordering assumes NTP-synced clocks (Alpine is). | Fine on a single cluster. Don't rely on journal ordering across clusters with unsynced clocks. |
+
+- **Unclaimable tasks block `follow_until_done()` forever.** A task whose
+  `resources.cores` (or `gpus`) exceeds *every* worker's capacity is never
+  claimed; workers idle-exit and leave it pending. `follow_until_done()` /
+  `follow_until_state()` poll until the pool drains, so without a bound they
+  block indefinitely. **Always pass a `timeout_s`** to those calls, and size
+  tasks to fit at least one worker.
 
 ---
 

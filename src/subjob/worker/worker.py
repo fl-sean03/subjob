@@ -148,6 +148,11 @@ class Worker:
         while not self._shutdown:
             if self._walltime_expired():
                 log.info("walltime budget exhausted; stopping")
+                # Mirror the signal handler: mark shutdown so in-flight tasks
+                # take the release (retry) path in _run_one rather than being
+                # recorded as failures. A walltime-preempted task is healthy,
+                # just out of time — it must be re-queued, not failed.
+                self._shutdown = True
                 break
             self._reap_finished()
             claimed_any = self._dispatch_pending()

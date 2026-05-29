@@ -39,6 +39,17 @@ def test_submit_via_cli(tmp_path):
     assert json.loads(r2.stdout)["pending"] == 1
 
 
+def test_submit_missing_task_file_emits_json_error(tmp_path):
+    """A bad/missing --task-file must yield parseable JSON, not a traceback."""
+    Pool(tmp_path / "p").init()
+    missing = str(tmp_path / "nonexistent.yaml")
+    r = _run(["submit", "--pool", str(tmp_path / "p"), "--task-file", missing])
+    assert r.returncode == 1, r.stderr
+    parsed = json.loads(r.stdout)  # must parse cleanly
+    assert parsed["error"]
+    assert parsed["task_file"] == missing
+
+
 def test_cancel_pending(tmp_path):
     pool = Pool(tmp_path / "p")
     pool.init()

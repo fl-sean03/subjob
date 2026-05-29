@@ -106,6 +106,32 @@ def test_roundtrip_with_attempts():
     assert back == obj
 
 
+def test_multiline_no_trailing_newline_roundtrips():
+    """A multi-line string without a trailing newline must NOT gain one."""
+    obj = {"command": "a\nb"}
+    text = yaml_lite.dumps(obj)
+    assert "|-" in text  # strip-chomp header
+    assert yaml_lite.loads(text) == obj
+
+
+def test_multiline_with_trailing_newline_roundtrips():
+    """A multi-line string with one trailing newline must keep exactly one."""
+    obj = {"command": "a\nb\n"}
+    text = yaml_lite.dumps(obj)
+    back = yaml_lite.loads(text)
+    assert back == obj
+
+
+def test_task_multiline_command_no_newline_roundtrips():
+    """A Task whose command is multi-line without a trailing newline survives
+    a full to_yaml / from_yaml round-trip unchanged."""
+    from subjob.lib.task import Task
+
+    t = Task(id="ml", command="cd /tmp && \\\n  echo hi")
+    back = Task.from_yaml(t.to_yaml())
+    assert back.command == "cd /tmp && \\\n  echo hi"
+
+
 def test_rejects_tabs():
     with pytest.raises(yaml_lite.ParseError, match="tab"):
         yaml_lite.loads("a:\n\tb: 1")

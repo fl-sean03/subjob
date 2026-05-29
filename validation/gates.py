@@ -207,6 +207,7 @@ def throughput_at_least(min_rate: float) -> Gate:
             return GateResult("throughput", False, "missing worker_started or task_done events")
         first = starts[0]["event_id"]
         last = max(e["event_id"] for e in dones)
+        # Assumes event_id ≈ nanoseconds (Pool.emit sets it to time.time_ns()).
         span_s = (last - first) / 1e9
         rate = len(dones) / span_s if span_s > 0 else float("inf")
         ok = rate >= min_rate

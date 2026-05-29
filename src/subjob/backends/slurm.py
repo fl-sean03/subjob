@@ -59,6 +59,10 @@ class SlurmBackend:
         extra_sbatch_args: list[str] | None = None,
     ) -> WorkerHandle:
         _validate_pool_dir(pool_dir)
+        _validate_directive_value("partition", partition)
+        _validate_directive_value("qos", qos)
+        for arg in extra_sbatch_args or []:
+            _validate_directive_value("extra_sbatch_args item", arg)
         if shutil.which(self.sbatch_cmd) is None:
             raise RuntimeError(f"sbatch not found on PATH (looked for {self.sbatch_cmd!r})")
 
@@ -103,6 +107,10 @@ class SlurmBackend:
         # SLURM directives can't be reliably quoted, so a pool_dir with
         # whitespace/quotes would silently truncate the log path — reject it.
         _validate_pool_dir(pool_dir)
+        # partition/qos are interpolated raw into #SBATCH directives; a newline
+        # or quote would inject arbitrary directives. Reject them like pool_dir.
+        _validate_directive_value("partition", partition)
+        _validate_directive_value("qos", qos)
         extras = []
         if partition:
             extras.append(f"#SBATCH --partition={partition}")
@@ -175,6 +183,14 @@ def _validate_pool_dir(pool_dir: str) -> None:
         raise ValueError(
             f"pool_dir must not contain whitespace or quotes for the SLURM backend: {pool_dir!r}"
         )
+
+
+def _validate_directive_value(label: str, value: str | None) -> None:
+    """Reject sbatch values that could inject extra directives via newline/quote."""
+    if value is None:
+        return
+    if "\n" in value or '"' in value:
+        raise ValueError(f"{label} must not contain a newline or quote: {value!r}")
 
 
 def _seconds_to_hms(seconds: int) -> str:

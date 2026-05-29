@@ -274,10 +274,15 @@ class Pool:
     def emit(self, event_type: str, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            # ns clock scaled up + per-PID salt: preserves time ordering while
-            # disambiguating same-ns emits from different processes sharing one
-            # journal (read_journal/follow still compare with strict `>`).
-            "event_id": time.time_ns() * 1000 + (os.getpid() % 1000),
+            # event_id is a nanosecond timestamp that serves three roles: the
+            # journal cursor (read_journal/follow compare with strict `>`), an
+            # ordering key, AND a coarse clock for validation's throughput gate
+            # (which divides event_id deltas by 1e9 assuming ns). Keep it a
+            # plain ns count so all three stay calibrated. Two emits on
+            # different nodes landing in the same ns would collide on the
+            # cursor — accepted Phase-0 limitation (astronomically rare; node
+            # clocks aren't ns-synced anyway).
+            "event_id": time.time_ns(),
             "type": event_type,
             "task_id": task_id,
             "payload": payload,

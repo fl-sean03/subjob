@@ -58,7 +58,6 @@ Inspired by [fl-sean03/allocation-scheduler](https://github.com/fl-sean03/alloca
 | `docs/DEPLOYMENT.md` | SLURM / CCM / local backends + operations |
 | `src/subjob/` | The code (Python stdlib only, like the upstream) |
 | `examples/` | Concrete use cases |
-| `.claude/skills/subjob-submit/` | Agent skill for submission |
 
 ## Where it sits relative to existing lab tooling
 

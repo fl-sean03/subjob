@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import time
 
 from subjob.lib.pool import Pool
@@ -243,6 +244,45 @@ def test_walltime_kill_reaps_forked_children(tmp_path):
     while time.time() < end:
         assert not marker.exists()
         time.sleep(0.5)
+
+
+def test_worker_walltime_expiry_releases_inflight_task(tmp_path):
+    """A worker that hits its allocation walltime mid-task must RELEASE the
+    in-flight claim (back to pending/), not record it as a failure. The task is
+    healthy, just preempted — the next worker should re-run it.
+
+    We give the task a generous OWN walltime (so the runner won't kill it) and
+    a far allocation deadline at claim time (so the fit-check lets it start),
+    then collapse the allocation deadline while it's running to simulate the
+    allocation walltime arriving mid-task.
+    """
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(
+        Task(id="preempted", command="sleep 6", resources=Resources(cores=1, walltime_seconds=300))
+    )
+    caps = Capabilities(cores=2, host="t", walltime_end=time.time() + 3600)  # far at claim
+    worker = Worker(pool, caps, poll_interval=0.1, walltime_safety_s=0.5)
+
+    # Once the task is claimed + running, slam the allocation deadline into the
+    # past so the next _loop iteration sees _walltime_expired() and shuts down.
+    def collapse_deadline():
+        for _ in range(100):
+            if pool.status()["claimed"] == 1:
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)  # ensure the subprocess is actually running
+        worker.caps.walltime_end = time.time() - 1.0
+
+    threading.Thread(target=collapse_deadline, daemon=True).start()
+    worker.run()
+
+    s = pool.status()
+    assert s["pending"] == 1, s  # released, awaiting retry
+    assert s["failed"] == 0, s  # NOT recorded as a failure
+    assert s["done"] == 0, s
+    types = [e["type"] for e in pool.read_journal()]
+    assert "task_released" in types
 
 
 def test_worker_sigterm_releases_inflight_task(tmp_path):

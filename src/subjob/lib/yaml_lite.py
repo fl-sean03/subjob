@@ -5,7 +5,7 @@ Supported:
   - Block sequences (`- item`, nested by indent)
   - Inline flow lists: `[]`, `[a, b, "c"]`
   - Empty inline flow map: `{}`
-  - Block scalars: `|` (literal, preserves newlines)
+  - Block scalars: `|` (literal, clip), `|-` (literal, strip), `|+` (tolerated as clip)
   - Scalars: int, float, bool (`true`/`false`), null (`null`, `~`, empty),
     plain strings, single-quoted, double-quoted (with `\\n`, `\\t`, `\\\\`, `\\"`)
   - Comments: full-line `#…` and end-of-line `␣#…` on plain scalars
@@ -121,8 +121,8 @@ def _parse_mapping(lines, i, indent):
         if rhs is None or rhs == "":
             # Value is on the following lines, deeper-indented, OR null.
             value, i = _parse_block(lines, i, indent)
-        elif rhs == "|":
-            value, i = _slurp_block_scalar(lines, i, indent)
+        elif rhs in ("|", "|-", "|+"):
+            value, i = _slurp_block_scalar(lines, i, indent, chomp=rhs[1:])
         else:
             value = _parse_scalar(rhs, ln_no)
         result[key] = value
@@ -174,10 +174,15 @@ def _parse_sequence(lines, i, indent):
     return items, i
 
 
-def _slurp_block_scalar(lines, i, key_indent):
-    """Collect raw lines indented deeper than `key_indent` for a `|` block.
+def _slurp_block_scalar(lines, i, key_indent, chomp=""):
+    """Collect raw lines indented deeper than `key_indent` for a block scalar.
 
-    Preserves newlines, strips the leading common indent.
+    Preserves newlines, strips the leading common indent. The `chomp` indicator
+    controls the trailing newline (matching the emitter's chomping choice):
+      ""  (`|`)  → clip:  keep exactly one trailing "\\n"
+      "-" (`|-`) → strip: no trailing newline
+      "+" (`|+`) → keep:  treated as clip here (Phase-0: we never emit `|+`,
+                   and our blocks don't carry trailing blank lines to keep).
     """
     if i >= len(lines):
         return "", i
@@ -195,7 +200,10 @@ def _slurp_block_scalar(lines, i, key_indent):
         extra = ln_indent - block_indent
         chunks.append(" " * extra + content)
         i += 1
-    return "\n".join(chunks) + "\n", i
+    body = "\n".join(chunks)
+    if chomp == "-":
+        return body, i
+    return body + "\n", i
 
 
 # ---------- scalar parsing ----------
@@ -338,9 +346,18 @@ def _emit(value, indent, out, is_root=False, after_dash=False):
                     out.append(f"{prefix}{k}:")
                     _emit(v, indent, out)  # sequences live at same indent as parent key
             elif isinstance(v, str) and "\n" in v:
-                # Multi-line strings use the literal block scalar form.
-                out.append(f"{prefix}{k}: |")
-                for ln in v.rstrip("\n").splitlines():
+                # Multi-line strings use the literal block scalar form, with a
+                # chomping indicator so the trailing-newline state round-trips:
+                #   ends with exactly one "\n" → `|`  (clip: keep one newline)
+                #   otherwise                  → `|-` (strip: no trailing newline)
+                if v.endswith("\n") and not v.endswith("\n\n"):
+                    header = "|"
+                    body = v[:-1]  # drop the single trailing newline before splitting
+                else:
+                    header = "|-"
+                    body = v
+                out.append(f"{prefix}{k}: {header}")
+                for ln in body.split("\n"):
                     out.append(f"{pad}  {ln}")
             else:
                 out.append(f"{prefix}{k}: {_emit_scalar(v)}")

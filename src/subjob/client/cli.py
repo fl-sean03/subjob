@@ -16,6 +16,17 @@ from pathlib import Path
 from subjob.lib.pool import Pool
 from subjob.lib.task import Task
 
+# Errors a bad/missing/invalid task file (or duplicate id) can raise. We turn
+# these into structured JSON instead of a raw traceback. ParseError subclasses
+# ValueError, but list it explicitly so the intent survives any future refactor.
+_SUBMIT_ERRORS: tuple[type[Exception], ...] = (FileNotFoundError, OSError, ValueError)
+try:
+    from subjob.lib.yaml_lite import ParseError as _ParseError
+
+    _SUBMIT_ERRORS = (*_SUBMIT_ERRORS, _ParseError)
+except ImportError:  # pragma: no cover - yaml_lite always importable in practice
+    pass
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="subjob", description="Pilot-job scheduler for HPC.")
@@ -86,8 +97,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def cmd_submit(args) -> int:
     pool = Pool(args.pool)
-    task = Task.read(Path(args.task_file))
-    task_id = pool.submit(task)
+    try:
+        task = Task.read(Path(args.task_file))
+        task_id = pool.submit(task)
+    except _SUBMIT_ERRORS as e:
+        # Bad/missing/invalid task file (or duplicate id) → emit structured
+        # JSON, not a raw traceback an agent can't parse.
+        _emit(args.format, {"error": str(e), "task_file": args.task_file})
+        return 1
     _emit(args.format, {"task_id": task_id, "pool": str(pool.root)})
     return 0
 
@@ -125,7 +142,11 @@ def cmd_cancel(args) -> int:
     pending = pool.pending_dir / name
     if pending.exists():
         # Move to failed/ with a cancelled marker so the history is intact.
-        task = Task.read(pending)
+        try:
+            task = Task.read(pending)
+        except (OSError, ValueError) as e:
+            _emit(args.format, {"error": str(e), "task_id": args.task_id})
+            return 1
         task.state = "failed"
         task.attempts = list(task.attempts) + [{"cancelled": True}]
         pending.write_text(task.to_yaml())
@@ -182,7 +203,7 @@ def cmd_reap_stale(args) -> int:
             event = "task_released" if args.to == "pending" else "task_failed"
             pool.emit(event, p.stem, {"reaped_stale": True, "age_s": round(age, 1)})
             reaped.append({"task_id": p.stem, "age_s": round(age, 1), "moved_to": args.to})
-        except OSError as e:
+        except (OSError, ValueError) as e:
             reaped.append({"task_id": p.stem, "error": str(e)})
     _emit(args.format, {"reaped": reaped, "count": len(reaped), "dry_run": args.dry_run})
     return 0
@@ -199,7 +220,12 @@ def cmd_failures(args) -> int:
     for p in paths:
         if not p.exists():
             continue
-        t = Task.read(p)
+        try:
+            t = Task.read(p)
+        except (OSError, ValueError) as e:
+            # A corrupt failed/ YAML shouldn't crash the whole triage listing.
+            items.append({"task_id": p.stem, "error": f"unreadable: {e}"})
+            continue
         last = t.attempts[-1] if t.attempts else {}
         err_path = pool.logs_dir / f"{t.id}.err"
         tail_bytes = 8000 if args.task_id else 2000
