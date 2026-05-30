@@ -1,0 +1,32 @@
+PSF
+
+       1 !NTITLE
+ REMARKS argon LJ gas
+
+       8 !NATOM
+       1 AR   1    AR   AR   AR     0.000000       39.9480           0
+       2 AR   2    AR   AR   AR     0.000000       39.9480           0
+       3 AR   3    AR   AR   AR     0.000000       39.9480           0
+       4 AR   4    AR   AR   AR     0.000000       39.9480           0
+       5 AR   5    AR   AR   AR     0.000000       39.9480           0
+       6 AR   6    AR   AR   AR     0.000000       39.9480           0
+       7 AR   7    AR   AR   AR     0.000000       39.9480           0
+       8 AR   8    AR   AR   AR     0.000000       39.9480           0
+
+       0 !NBOND: bonds
+
+       0 !NTHETA: angles
+
+       0 !NPHI: dihedrals
+
+       0 !NIMPHI: impropers
+
+       0 !NDON: donors
+
+       0 !NACC: acceptors
+
+       0 !NNB
+       0       0       0       0       0       0       0       0
+
+       1       0 !NGRP
+       0       0       0

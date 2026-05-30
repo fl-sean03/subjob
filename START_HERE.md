@@ -52,21 +52,27 @@ After this you should be able to answer:
 - `tests/test_pool.py`, `tests/test_worker.py`, `tests/test_claim_race.py` — pytest, no compute, < 10 sec each. Race test should spawn 4 fake workers and verify exactly one wins each task.
 - `pyproject.toml` — minimal, Python ≥ 3.9, stdlib only (no external runtime deps). Dev deps: pytest, ruff.
 
-**Don't build (Phase 0 is small on purpose):**
+**Don't build (the original Phase 0 contract — kept here as historical
+scope discipline; see README.md and `validation/RESULTS.md` for what's
+actually shipped today):**
 
-- ❌ Task DAG (`depends_on`) — Phase 2
-- ❌ GPU resource tracking — Phase 2
-- ❌ Priors integration / failure classification — Phase 1 (dogfood-driven)
-- ❌ Artifact validation — Phase 1
+- ~~Task DAG (`depends_on`)~~ — **shipped 2026-05-30** (Cycle 2 Thrust 9; commit `68aad95`)
+- ❌ GPU resource tracking (multi-GPU type / per-device accounting) — Phase 2
+- ~~Priors integration / failure classification~~ — **shipped 2026-05-30** (Cycle 2 Thrust 11; commit `bb264ae` — `pool.diagnose` + `subjob diagnose`)
+- ~~Artifact validation~~ — **shipped 2026-05-30** (Cycle 2 Thrust 8; commit `1e2498c` — `artifacts.expect` + `success_marker`)
 - ❌ Cancellation API — Phase 1 (until someone asks)
-- ❌ Multi-pilot heartbeats / stale-lock recovery — Phase 1
+- ~~Multi-pilot heartbeats / stale-lock recovery~~ — **shipped 2026-05-30** (Cycle 2 Thrust 10; commit `335b3ed` — heartbeats + auto reap-stale)
 - ❌ Web UI / TUI — Phase 3
 - ❌ CCM backend — Phase 2
 - ❌ Database — never
 - ❌ Authentication — never (in our scope)
 - ❌ Anything not listed in the "Do build" list
 
-If you find yourself adding "just a little of X" where X is in the don't-build list, **stop and ask the user**.
+If you find yourself adding "just a little of X" where X above is still
+`❌`, **stop and ask the user**. The struck-through rows above shipped in
+Cycle 2 (2026-05-30) under explicit user direction — see
+`docs/sessions/2026-05-30_pre-dogfood-phase1-infra.md` for the authority
+chain. New work past those needs the same explicit gate.
 
 ---
 

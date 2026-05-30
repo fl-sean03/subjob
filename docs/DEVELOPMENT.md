@@ -31,6 +31,12 @@ Dogfood-driven. Each phase delivers something used in production before the next
 
 ## Phase 1 — Dogfood against per-snapshot analysis
 
+**Phase 0 shipped 2026-05-26.** Pool API, worker (concurrent tasks + walltime
+awareness), CLI (submit/status/follow/cancel), SLURM backend, examples
+(sleep_test + per_snapshot_analysis_dryrun), and a stdlib-only YAML subset
+parser are all in place — 63 passing tests, ruff clean. Phase 1 begins
+when the cool+prod fan-out completes on `~/LabWork/Workspace/31-Hydrogenation/`.
+
 **Trigger**: cool+prod fan-out finishes (60 simulation.dcd files exist).
 
 **Dogfood workload**: `/hydrog-run-pipeline` per snapshot × 60 = 60 analysis tasks (2-15 min each). This is the highest-leverage pilot case in the project.

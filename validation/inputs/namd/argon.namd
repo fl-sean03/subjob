@@ -1,0 +1,14 @@
+structure          argon.psf
+coordinates        argon.pdb
+paratypecharmm     on
+parameters         argon.params
+exclude            none
+1-4scaling         1.0
+cutoff             8.0
+switching          on
+switchdist         7.0
+pairlistdist       10.0
+temperature        300
+timestep           1.0
+outputname         argon_out
+numsteps           100

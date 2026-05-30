@@ -144,6 +144,18 @@ Resource matching is dumb-but-correct: task asks for `cores: 64, gpus: 1` → wo
 
 ## Client (agent-facing)
 
+> **Design sketch — keep `docs/AGENT_GUIDE.md` as the source of truth for the
+> real API.** The aspirational method names in this sketch were never built
+> as written. Their real-API equivalents (all shipped):
+>
+> - `pool.failed()` → `pool.list_state("failed")` + `pool.read_task("failed", id)`
+> - `task.diagnosis()` → `pool.diagnose(task_id)`
+> - `subjob diagnose` → shipped (Cycle 2, 2026-05-30)
+>
+> Still future: `pool.read_artifact(task_id, name)` (a one-call validated
+> read-back helper; artifact VALIDATION itself is shipped — see
+> AGENT_GUIDE "Artifact validation").
+
 ```python
 from subjob import Pool, Task
 
@@ -155,7 +167,7 @@ ids = pool.submit_batch([
 ])
 
 # Status
-print(pool.status())  # {pending: 17, claimed: 0, running: 3, done: 0, failed: 0}
+print(pool.status())  # {pending: 17, claimed: 3, done: 0, failed: 0}  (claimed = in-flight)
 
 # Wait for batch completion
 for event in pool.follow(timeout_s=3600):
@@ -176,7 +188,7 @@ The worker is mostly backend-agnostic. The differences:
 | Backend | What it provides |
 |---|---|
 | `slurm` | inside an sbatch allocation; worker uses `SLURM_NTASKS`, `SLURM_JOB_ID` etc. |
-| `ccm` | CCM-managed Vast.ai instance; worker has CCM job ID, runs until destroyed |
+| `ccm` *(Phase 2 — not implemented)* | CCM-managed Vast.ai instance; worker has CCM job ID, runs until destroyed |
 | `local` | direct execution; useful for testing + small interactive workflows |
 
 A backend is responsible for **submitting the worker itself** (the outer allocation). The pool + task code doesn't care.
@@ -205,7 +217,7 @@ These are intentionally excluded from MVP. Adding any requires a real use case t
 
 ## Open questions to resolve before code
 
-- **Does CCM fold in?** Cross-analysis lives at `docs/CCM_INTEGRATION_ANALYSIS.md` (TBD).
-- **Pool dir lifecycle**: how/when do done tasks get archived? Probably after N days, gzip the YAML.
+- **Does CCM fold in?** Still open. Cross-analysis lives at `docs/CCM_INTEGRATION_ANALYSIS.md`; decision deferred to Phase 2.
+- **Pool dir lifecycle**: `subjob archive` ships (Cycle 1 close-out 2026-05-29); journal rotation remains a manual operator step. Multi-week growth policy still TBD.
 - **Workers with heterogeneous resources** (e.g., one worker on c128, one on c64): how does that affect priority/claiming?
-- **Heartbeats**: should workers write a heartbeat file every ~60s so the pool can detect dead claims? Probably yes.
+- ~~**Heartbeats**: should workers write a heartbeat file every ~60s so the pool can detect dead claims?~~ **Yes — shipped 2026-05-30** (Cycle 2 Thrust 10). Claim-stamp + per-pool `.heartbeats/<worker_id>`; live workers self-heal a dead cohort-mate via auto-sweep. See `DEPLOYMENT.md §2`.

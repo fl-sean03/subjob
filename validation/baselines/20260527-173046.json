@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-05-27T23:30:46Z",
+  "backend": "local",
+  "n_tasks": 50,
+  "throughput_tasks_per_s": 73.34,
+  "claim_lat_p50_s": 0.3534,
+  "claim_lat_p99_s": 0.6794,
+  "claim_lat_mean_s": 0.313,
+  "worker_starts": 1,
+  "worker_stops": 1,
+  "tasks_done": 50,
+  "n_tasks_submitted": 1000,
+  "submit_elapsed_s": 0.314,
+  "submit_rate_tasks_per_s": 3187.9
+}
