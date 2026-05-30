@@ -147,3 +147,5 @@ gated on the hydrogenation cool+prod dogfood:
 - **Reversibility:** trivial — both thrusts are tightly bounded.
 
 - 2026-05-30 — Thrust 12 (P0 + 3 P1 code) subordinate spawned. Lane: `src/subjob/lib/{pool,yaml_lite,artifacts}.py` + `src/subjob/worker/worker.py` + tests.
+- 2026-05-30 — Thrust 12 returned: 212 tests pass (+9), ruff clean, rename-first hypothesis held, manual 50/50 threaded race smoke confirms no resurrection. P0 fix verified by orchestrator (`_finalize` + `release` both now: exists()→rename→write_text-at-dest→emit; the load-bearing exclusion is the atomic rename, not the .exists() guard). Committed `64af868` → pushed.
+- 2026-05-30 — Thrust 13 (doc-staleness sweep) subordinate spawned. Lane: `README.md`, `START_HERE.md`, `docs/{ARCHITECTURE,DEPLOYMENT,AGENT_GUIDE}.md`, `validation/RESULTS.md` + small Pool.diagnose change to catch PriorSchemaError internally. T12 already touched AGENT_GUIDE's DAG section narrowly — T13 owns the rest of the sweep with explicit instruction to leave the DAG grace note in place.
