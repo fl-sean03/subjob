@@ -187,7 +187,26 @@ class Worker:
         claimed_count = 0
         # pending_tasks() returns cached (path, Task) pairs — no re-read here.
         # Corrupt-YAML quarantine is handled inside pending_tasks().
-        for path, peek in self.pool.pending_tasks():
+        pending = self.pool.pending_tasks()
+        # DAG dep-state lookup: compute terminal-state sets ONCE per dispatch
+        # cycle so a fan-in/fan-out batch doesn't restat the same dirs per task.
+        # Per-task pre-claim gate (Phase-1 pull-forward) — no graph datastructure
+        # needed; the dispatch loop already iterates each pending peek.
+        done_ids: set[str] | None = None
+        failed_ids: set[str] | None = None
+        claimed_ids: set[str] | None = None
+        pending_ids: set[str] | None = None
+
+        def _dep_sets() -> tuple[set[str], set[str], set[str], set[str]]:
+            nonlocal done_ids, failed_ids, claimed_ids, pending_ids
+            if done_ids is None:
+                done_ids = {p.stem for p in self.pool.list_state("done")}
+                failed_ids = {p.stem for p in self.pool.list_state("failed")}
+                claimed_ids = {p.stem for p in self.pool.list_state("claimed")}
+                pending_ids = {p.stem for p, _ in pending}
+            return done_ids, failed_ids, claimed_ids, pending_ids  # type: ignore[return-value]
+
+        for path, peek in pending:
             # Cap infinite walltime-bounce: a task repeatedly released without
             # completing (e.g. it needs more time than any worker has) is
             # failed rather than re-run forever.
@@ -204,6 +223,50 @@ class Worker:
                         },
                     )
                 continue
+            # DAG gate: a task with unmet deps either waits, cascades-failed
+            # (dep already failed), or fails-fast (dep is unknown / never
+            # submitted). Sits between max_attempts and the capacity check so
+            # capacity isn't burned on tasks that can't run yet.
+            if peek.depends_on:
+                done_s, failed_s, claimed_s, pending_s = _dep_sets()
+                dep_action: tuple[str, str] | None = None  # ("cascade"|"unknown", dep_id)
+                deps_pending = False
+                for dep_id in peek.depends_on:
+                    if dep_id in done_s:
+                        continue
+                    if dep_id in failed_s:
+                        dep_action = ("cascade", dep_id)
+                        break
+                    if dep_id in pending_s or dep_id in claimed_s:
+                        deps_pending = True
+                        continue
+                    # Not terminal, not in-flight, not queued — typo or
+                    # never-submitted. Fail-fast so we don't starve the queue
+                    # waiting for something that will never arrive.
+                    dep_action = ("unknown", dep_id)
+                    break
+                if dep_action is not None:
+                    claimed = self.pool.claim(path)
+                    if claimed is not None:
+                        kind, dep_id = dep_action
+                        if kind == "cascade":
+                            payload = {
+                                "dep_failed": dep_id,
+                                "error": f"dependency {dep_id!r} failed",
+                                "host": self.caps.host,
+                            }
+                        else:
+                            payload = {
+                                "unknown_dep": dep_id,
+                                "error": f"depends_on references unknown task {dep_id!r}",
+                                "host": self.caps.host,
+                            }
+                        self.pool.commit_failed(claimed, payload)
+                    continue
+                if deps_pending:
+                    # Deps haven't reached a terminal state yet — leave the task
+                    # in pending/ and re-evaluate next cycle. Don't burn a claim.
+                    continue
             with self._lock:
                 # No free cores at all → nothing more can be claimed this cycle.
                 if self._cores_free <= 0:

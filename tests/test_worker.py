@@ -399,6 +399,143 @@ def test_worker_success_marker_substring_must_match(tmp_path):
     assert detail.get("success_marker_contains") == "PRODUCTION COMPLETE"
 
 
+def test_dag_linear_chain(tmp_path):
+    """A → B(depends_on=A) → C(depends_on=B): all three done, in order."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="A", command="echo A", resources=Resources(cores=1)))
+    pool.submit(Task(id="B", command="echo B", resources=Resources(cores=1), depends_on=["A"]))
+    pool.submit(Task(id="C", command="echo C", resources=Resources(cores=1), depends_on=["B"]))
+    Worker(
+        pool,
+        Capabilities(cores=4, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=2.0,
+    ).run()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 3, "failed": 0}, s
+    # Confirm done-ordering via task_done event_ids.
+    done_events = [
+        (e["task_id"], e["event_id"])
+        for e in pool.read_journal()
+        if e["type"] == "task_done"
+    ]
+    by_id = dict(done_events)
+    assert by_id["A"] < by_id["B"] < by_id["C"]
+
+
+def test_dag_fan_in(tmp_path):
+    """A and B independent; C depends_on=[A, B] runs only after both done."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="A", command="echo A", resources=Resources(cores=1)))
+    pool.submit(Task(id="B", command="echo B", resources=Resources(cores=1)))
+    pool.submit(
+        Task(id="C", command="echo C", resources=Resources(cores=1), depends_on=["A", "B"])
+    )
+    Worker(
+        pool,
+        Capabilities(cores=4, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=2.0,
+    ).run()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 3, "failed": 0}, s
+    by_id = {
+        e["task_id"]: e["event_id"]
+        for e in pool.read_journal()
+        if e["type"] == "task_done"
+    }
+    assert by_id["A"] < by_id["C"]
+    assert by_id["B"] < by_id["C"]
+
+
+def test_dag_fan_out(tmp_path):
+    """A; B and C both depends_on=[A]: B and C both run after A done."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="A", command="echo A", resources=Resources(cores=1)))
+    pool.submit(Task(id="B", command="echo B", resources=Resources(cores=1), depends_on=["A"]))
+    pool.submit(Task(id="C", command="echo C", resources=Resources(cores=1), depends_on=["A"]))
+    Worker(
+        pool,
+        Capabilities(cores=4, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=2.0,
+    ).run()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 3, "failed": 0}, s
+    by_id = {
+        e["task_id"]: e["event_id"]
+        for e in pool.read_journal()
+        if e["type"] == "task_done"
+    }
+    assert by_id["A"] < by_id["B"]
+    assert by_id["A"] < by_id["C"]
+
+
+def test_dag_dep_failed_cascades(tmp_path):
+    """A fails (exit 7); B depends_on=[A] cascades-failed with dep_failed marker."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="A", command="exit 7", resources=Resources(cores=1)))
+    pool.submit(Task(id="B", command="echo B", resources=Resources(cores=1), depends_on=["A"]))
+    Worker(
+        pool,
+        Capabilities(cores=2, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=2.0,
+    ).run()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 0, "failed": 2}, s
+    b = pool.read_task("failed", "B")
+    last = b.attempts[-1]
+    assert last.get("dep_failed") == "A"
+    assert "dependency 'A' failed" in last.get("error", "")
+
+
+def test_dag_unknown_dep(tmp_path):
+    """B depends_on=['ghost']: ghost never submitted, B fails-fast."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(
+        Task(id="B", command="echo B", resources=Resources(cores=1), depends_on=["ghost"])
+    )
+    Worker(
+        pool,
+        Capabilities(cores=2, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=1.0,
+    ).run()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 0, "failed": 1}, s
+    b = pool.read_task("failed", "B")
+    last = b.attempts[-1]
+    assert last.get("unknown_dep") == "ghost"
+    assert "ghost" in last.get("error", "")
+
+
+def test_dag_does_not_starve_independent_tasks(tmp_path):
+    """A blocked on a never-submitted dep must NOT block Indep from running."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(
+        Task(id="A", command="echo A", resources=Resources(cores=1), depends_on=["never"])
+    )
+    pool.submit(Task(id="Indep", command="echo I", resources=Resources(cores=1)))
+    Worker(
+        pool,
+        Capabilities(cores=2, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=1.0,
+    ).run()
+    s = pool.status()
+    assert s["done"] == 1 and s["failed"] == 1, s
+    assert (pool.done_dir / "Indep.yaml").exists()
+    a = pool.read_task("failed", "A")
+    assert a.attempts[-1].get("unknown_dep") == "never"
+
+
 def test_worker_sigterm_releases_inflight_task(tmp_path):
     """SIGTERM to a worker mid-task must release the claim (not fail it) and
     not hang on the in-flight subprocess. Models SLURM preemption."""
