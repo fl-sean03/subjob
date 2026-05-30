@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import signal
 import socket
 import threading
@@ -38,6 +39,12 @@ log = logging.getLogger("subjob.worker")
 DEFAULT_POLL_INTERVAL = 1.0
 DEFAULT_WALLTIME_SAFETY = 60.0  # seconds reserved at end of allocation for cleanup
 DEFAULT_MAX_ATTEMPTS = 3  # release-and-retry cap before a task is failed
+DEFAULT_HEARTBEAT_INTERVAL_S = 30.0  # how often the worker touches its heartbeat file
+DEFAULT_AUTO_REAP_INTERVAL_S = 120.0  # how often a live worker sweeps for dead-owner claims
+# AUTO-sweep staleness threshold = 4× heartbeat interval. Conservative: a single
+# missed heartbeat (NFS hiccup, GC pause) doesn't trigger a reap; four-in-a-row
+# does. Operators can override via --auto-reap-threshold / reap-stale --older-than.
+DEFAULT_AUTO_REAP_THRESHOLD_MULTIPLIER = 4.0
 
 
 @dataclass
@@ -114,12 +121,43 @@ class Worker:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         idle_timeout_s: float | None = None,
         walltime_safety_s: float = DEFAULT_WALLTIME_SAFETY,
+        heartbeat_interval_s: float | None = DEFAULT_HEARTBEAT_INTERVAL_S,
+        auto_reap_interval_s: float | None = DEFAULT_AUTO_REAP_INTERVAL_S,
+        auto_reap_threshold_s: float | None = None,
     ):
         self.pool = pool
         self.caps = capabilities
         self.poll_interval = poll_interval
         self.idle_timeout_s = idle_timeout_s
         self.walltime_safety_s = walltime_safety_s
+        self.heartbeat_interval_s = heartbeat_interval_s
+        # auto_reap_interval_s=0 disables (parity with CLI flag convention);
+        # None also disables.
+        if auto_reap_interval_s is not None and auto_reap_interval_s <= 0:
+            auto_reap_interval_s = None
+        self.auto_reap_interval_s = auto_reap_interval_s
+        # Default threshold: 4× heartbeat interval (see module comment). If
+        # heartbeats are disabled, fall back to the auto-reap interval so a
+        # legacy/mtime-only sweep still gets a sane window.
+        if auto_reap_threshold_s is None:
+            base = heartbeat_interval_s if heartbeat_interval_s else (auto_reap_interval_s or 30.0)
+            auto_reap_threshold_s = base * DEFAULT_AUTO_REAP_THRESHOLD_MULTIPLIER
+        self.auto_reap_threshold_s = auto_reap_threshold_s
+
+        # Worker identity: only when heartbeats are enabled (the auto-sweep
+        # depends on a stable id; without heartbeats there is nothing to read
+        # against). Mutates the supplied Pool to propagate the id into claim()
+        # — chosen over a setter because (i) it keeps Worker's public surface
+        # small, (ii) the Pool already lives only for this Worker's lifetime,
+        # and (iii) it matches how Capabilities is also mutated mid-run
+        # (walltime_end). Documented in the return.
+        self.worker_id: str | None = None
+        if heartbeat_interval_s is not None:
+            self.worker_id = (
+                f"{capabilities.host or socket.gethostname()}-{os.getpid()}-"
+                f"{random.randint(1000, 9999)}"
+            )
+            self.pool.worker_id = self.worker_id
 
         self._cores_free = capabilities.cores
         self._gpus_free = capabilities.gpus
@@ -128,6 +166,8 @@ class Worker:
         self._lock = threading.Lock()
         self._shutdown = False
         self._executor: ThreadPoolExecutor | None = None
+        self._last_heartbeat: float = 0.0
+        self._last_auto_reap: float = 0.0
 
     # ----- main loop -----
 
@@ -149,7 +189,19 @@ class Worker:
                     remaining,
                     self.walltime_safety_s,
                 )
-        self.pool.emit("worker_started", "", {"host": self.caps.host, "cores": self.caps.cores})
+        self.pool.emit(
+            "worker_started",
+            "",
+            {
+                "host": self.caps.host,
+                "cores": self.caps.cores,
+                "worker_id": self.worker_id,
+            },
+        )
+        # First heartbeat before the loop starts: a sibling worker that polls
+        # auto-reap between our claim and our first in-loop tick should still
+        # see us as alive.
+        self._maybe_heartbeat(force=True)
         self._executor = ThreadPoolExecutor(max_workers=max(self.caps.cores, 1))
         try:
             self._loop()
@@ -157,6 +209,13 @@ class Worker:
             self._drain_or_release()
             if self._executor is not None:
                 self._executor.shutdown(wait=True)
+            if self.worker_id is not None:
+                # Best-effort cleanup; never block shutdown on a missing file
+                # or permission glitch.
+                try:
+                    self.pool.remove_heartbeat(self.worker_id)
+                except OSError:
+                    log.exception("failed to remove heartbeat file on shutdown")
             self.pool.emit("worker_stopped", "", {"host": self.caps.host})
 
     def _loop(self) -> None:
@@ -170,6 +229,8 @@ class Worker:
                 # just out of time — it must be re-queued, not failed.
                 self._shutdown = True
                 break
+            self._maybe_heartbeat()
+            self._maybe_auto_reap()
             self._reap_finished()
             claimed_any = self._dispatch_pending()
             with self._lock:
@@ -180,6 +241,41 @@ class Worker:
             time.sleep(self.poll_interval)
         # Final reap so anything that finished during the last sleep is committed.
         self._reap_finished()
+
+    # ----- heartbeat / auto-reap -----
+
+    def _maybe_heartbeat(self, *, force: bool = False) -> None:
+        if self.worker_id is None or self.heartbeat_interval_s is None:
+            return
+        now = time.time()
+        if not force and (now - self._last_heartbeat) < self.heartbeat_interval_s:
+            return
+        try:
+            self.pool.write_heartbeat(self.worker_id)
+        except OSError:
+            # Filesystem flap shouldn't kill the loop; we'll retry next tick.
+            log.exception("heartbeat write failed for %s", self.worker_id)
+            return
+        self._last_heartbeat = now
+
+    def _maybe_auto_reap(self) -> None:
+        if self.auto_reap_interval_s is None:
+            return
+        now = time.time()
+        if (now - self._last_auto_reap) < self.auto_reap_interval_s:
+            return
+        self._last_auto_reap = now
+        try:
+            results = self.pool.auto_reap_stale(
+                threshold_s=self.auto_reap_threshold_s,
+                skip_worker_id=self.worker_id,
+                now=now,
+            )
+        except OSError:
+            log.exception("auto-reap sweep failed; will retry next interval")
+            return
+        if results:
+            log.info("auto-reaped %d stale claim(s): %s", len(results), results)
 
     # ----- dispatch / reap -----
 

@@ -308,6 +308,104 @@ def test_archive_include_failed(tmp_path):
     assert (pool.root / "archive" / "boom.yaml.gz").exists()
 
 
+def _plant_stamped_claim(pool, task_id, worker_id):
+    """Plant a task in claimed/ with a claimed_by stamp."""
+    t = Task(
+        id=task_id,
+        command="echo hi",
+        attempts=[
+            {
+                "claimed_by": worker_id,
+                "claimed_at": "2026-05-30T00:00:00Z",
+                "host": "deadhost",
+            }
+        ],
+    )
+    path = pool.claimed_dir / f"{task_id}.yaml"
+    path.write_text(t.to_yaml())
+    return path
+
+
+def test_reap_stale_auto_with_missing_heartbeat(tmp_path):
+    """--auto reaps a claim whose claimed_by has no heartbeat file."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _plant_stamped_claim(pool, "orph", "dead-w0")
+    # No heartbeat written → owner_missing
+    r = _run([
+        "reap-stale", "--pool", str(tmp_path / "p"),
+        "--auto", "--older-than", "60",
+    ])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    assert parsed["reaped"][0]["task_id"] == "orph"
+    assert parsed["reaped"][0]["reason"] == "owner_missing"
+    assert pool.status()["pending"] == 1
+    assert pool.status()["claimed"] == 0
+
+
+def test_reap_stale_auto_with_stale_heartbeat(tmp_path):
+    """--auto reaps a claim whose owner heartbeat is older than the threshold."""
+    import time as _time
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _plant_stamped_claim(pool, "stuck", "owner-w1")
+    # Write an old heartbeat (~500s ago)
+    pool.write_heartbeat("owner-w1", now_ns=int((_time.time() - 500) * 1e9))
+    r = _run([
+        "reap-stale", "--pool", str(tmp_path / "p"),
+        "--auto", "--older-than", "60",
+    ])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    reason = parsed["reaped"][0]["reason"]
+    assert reason.startswith("owner_stale_"), reason
+    assert pool.status()["pending"] == 1
+
+
+def test_reap_stale_auto_with_fresh_heartbeat_skips(tmp_path):
+    """--auto must NOT reap a claim whose owner heartbeat is fresh."""
+    import time as _time
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _plant_stamped_claim(pool, "live", "owner-w2")
+    # Fresh heartbeat
+    pool.write_heartbeat("owner-w2", now_ns=int(_time.time() * 1e9))
+    r = _run([
+        "reap-stale", "--pool", str(tmp_path / "p"),
+        "--auto", "--older-than", "60",
+    ])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 0
+    assert pool.status()["claimed"] == 1
+
+
+def test_reap_stale_auto_falls_back_to_mtime_for_legacy_claims(tmp_path):
+    """A claim with NO claimed_by stamp falls back to mtime under --auto."""
+    import os
+    import time as _time
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="legacy", command="echo hi"))
+    # Move to claimed/ without any stamp; backdate mtime.
+    os.rename(pool.pending_dir / "legacy.yaml", pool.claimed_dir / "legacy.yaml")
+    old = _time.time() - 10000
+    os.utime(pool.claimed_dir / "legacy.yaml", (old, old))
+    r = _run([
+        "reap-stale", "--pool", str(tmp_path / "p"),
+        "--auto", "--older-than", "60",
+    ])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 1
+    reason = parsed["reaped"][0]["reason"]
+    assert reason.startswith("legacy_mtime_"), reason
+    assert pool.status()["pending"] == 1
+
+
 def test_reap_stale_respects_threshold(tmp_path):
     import os
     pool = Pool(tmp_path / "p")

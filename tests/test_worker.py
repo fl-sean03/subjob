@@ -536,6 +536,133 @@ def test_dag_does_not_starve_independent_tasks(tmp_path):
     assert a.attempts[-1].get("unknown_dep") == "never"
 
 
+def test_worker_writes_heartbeat_at_startup(tmp_path):
+    """A Worker with heartbeats enabled writes a heartbeat file on startup and
+    removes it on shutdown."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="t1", command="echo hi"))
+    worker = Worker(
+        pool,
+        Capabilities(cores=1, host="testhost"),
+        poll_interval=0.05,
+        idle_timeout_s=0.3,
+        heartbeat_interval_s=0.1,
+        auto_reap_interval_s=None,  # don't sweep during this test
+    )
+    seen_path: list = []
+
+    real_loop = worker._loop
+
+    def loop_with_check():
+        # During the loop, the heartbeat file must exist.
+        hb = pool.heartbeats_dir / worker.worker_id
+        if hb.exists():
+            seen_path.append(hb)
+        return real_loop()
+
+    worker._loop = loop_with_check
+    worker.run()
+    # Heartbeat existed during the run
+    assert seen_path, "heartbeat file was never seen on disk during run"
+    # And was removed on shutdown
+    assert not (pool.heartbeats_dir / worker.worker_id).exists()
+
+
+def test_worker_auto_reap_releases_dead_workers_claims(tmp_path):
+    """Plant a claim stamped by a dead worker (no heartbeat). A live worker's
+    auto-sweep should release it back to pending and then run it to done."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    # Plant a task in claimed/ with a claimed_by stamp for a non-existent worker.
+    t = Task(
+        id="orphan",
+        command="echo recovered",
+        resources=Resources(cores=1, walltime_seconds=60),
+        attempts=[
+            {
+                "claimed_by": "dead-w0",
+                "claimed_at": "2026-05-30T00:00:00Z",
+                "host": "deadhost",
+            }
+        ],
+        state="pending",  # will be reset on dispatch
+    )
+    claimed_path = pool.claimed_dir / "orphan.yaml"
+    claimed_path.write_text(t.to_yaml())
+    # No heartbeat file for dead-w0 → owner_missing.
+
+    worker = Worker(
+        pool,
+        Capabilities(cores=2, host="live"),
+        poll_interval=0.05,
+        idle_timeout_s=1.5,
+        heartbeat_interval_s=0.1,
+        auto_reap_interval_s=0.1,
+        auto_reap_threshold_s=0.5,
+    )
+    worker.run()
+    # The orphan task should now be in done/ (auto-reaped to pending, then run).
+    s = pool.status()
+    assert s["done"] == 1, s
+    assert s["claimed"] == 0, s
+    # Journal records a task_released with reaped_stale: True
+    events = pool.read_journal()
+    released = [
+        e for e in events
+        if e["type"] == "task_released" and e["task_id"] == "orphan"
+    ]
+    assert released, "expected a task_released event for the orphan"
+    assert released[0]["payload"].get("reaped_stale") is True
+    assert "owner_missing" in released[0]["payload"].get("reason", "")
+
+
+def test_worker_does_not_reap_its_own_claims(tmp_path):
+    """A worker's auto-sweep must skip claims whose claimed_by == self.worker_id,
+    even if its own heartbeat is stale (e.g. simulated by writing an old ts)."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    # Build the worker so we know its worker_id.
+    worker = Worker(
+        pool,
+        Capabilities(cores=2, host="me"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+        heartbeat_interval_s=0.5,
+        auto_reap_interval_s=None,  # we'll drive auto_reap_stale directly
+        auto_reap_threshold_s=0.1,
+    )
+    wid = worker.worker_id
+    assert wid is not None
+
+    # Plant a claim stamped by THIS worker (as if we owned it).
+    t = Task(
+        id="mine",
+        command="echo mine",
+        resources=Resources(cores=1, walltime_seconds=60),
+        attempts=[
+            {
+                "claimed_by": wid,
+                "claimed_at": "2026-05-30T00:00:00Z",
+                "host": "me",
+            }
+        ],
+    )
+    claimed_path = pool.claimed_dir / "mine.yaml"
+    claimed_path.write_text(t.to_yaml())
+
+    # Write an artificially STALE heartbeat for ourselves.
+    pool.write_heartbeat(wid, now_ns=int((time.time() - 9999) * 1e9))
+
+    # Call the sweep directly; even with a stale heartbeat we must NOT reap our own.
+    results = pool.auto_reap_stale(
+        threshold_s=0.1, skip_worker_id=wid, now=time.time()
+    )
+    assert results == [], f"unexpected reap of own claim: {results}"
+    # And the claim is still in claimed/
+    assert claimed_path.exists()
+
+
 def test_worker_sigterm_releases_inflight_task(tmp_path):
     """SIGTERM to a worker mid-task must release the claim (not fail it) and
     not hang on the in-flight subprocess. Models SLURM preemption."""

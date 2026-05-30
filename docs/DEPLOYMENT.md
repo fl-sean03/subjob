@@ -64,32 +64,50 @@ allocation end.
 | Worker gets SIGTERM (SLURM preempt / scancel) | Same — clean release, kills the in-flight subprocess so it doesn't orphan or double-run | Nothing |
 | Task exceeds its own `walltime_seconds` | Killed, moved to `failed/` with `walltime_killed=True` | Raise the task's walltime or split the work |
 | Task exits non-zero / segfaults | Moved to `failed/` with the exit code recorded | Diagnose from `failed/<id>.yaml` attempts + `logs/<id>.err` |
-| **Worker node dies** (crash, network loss) | **Nothing** — Phase 0 has no heartbeats. The claim sits orphaned in `claimed/` | Run `subjob reap-stale` (below) |
+| **Worker node dies** (crash, network loss) | **Detected automatically** by other live workers via missing/stale heartbeat (`<pool>/.heartbeats/<worker_id>`). Stale claims are released back to `pending/` (event: `task_released` with `reaped_stale: True`) so a live worker retries them. | Nothing, when any other worker is running. If the whole cohort died, run `subjob reap-stale [--auto]` (below). |
 
-### Dead-worker recovery: `subjob reap-stale`
+### Dead-worker recovery: heartbeats + `subjob reap-stale`
 
-Phase 0 deliberately has no heartbeats (anti-feature list). If a worker's
-node dies, its claims are stranded in `claimed/`. Recover them manually:
+Each worker touches `<pool>/.heartbeats/<worker_id>` every ~30s (configurable
+via `--heartbeat-interval`; 0 disables). Each worker also periodically sweeps
+`claimed/` (every `--auto-reap-interval` seconds, default 120s) and releases
+any claim whose stamped `claimed_by` owner has no heartbeat or a heartbeat
+older than ~4× the heartbeat interval. A worker never reaps its OWN claims.
+Result: a live cohort self-heals from a single dead node without operator
+intervention.
+
+`subjob reap-stale` remains as an operator escape hatch — useful when the
+entire cohort is gone, or to force an immediate sweep:
 
 ```bash
-# Move claims older than 2h back to pending/ so a live worker retries them.
-# Use a threshold safely LARGER than your longest task's walltime.
+# Heartbeat-aware sweep (preferred when workers stamp claims). Default
+# --older-than for --auto is 120s (= 4× the worker heartbeat interval).
+subjob reap-stale --pool /scratch/.../pool --auto --older-than 120
+
+# Legacy mtime-only sweep (Phase 0 behavior; still works on un-stamped claims):
+# moves claims older than 2h back to pending/. Use a threshold safely LARGER
+# than your longest task's walltime.
 subjob reap-stale --pool /scratch/.../pool --older-than 7200 --to pending
 
 # Preview without moving:
-subjob reap-stale --pool /scratch/.../pool --older-than 7200 --dry-run
+subjob reap-stale --pool /scratch/.../pool --auto --older-than 120 --dry-run
 
 # Give up on them instead (move to failed/):
-subjob reap-stale --pool /scratch/.../pool --older-than 7200 --to failed
+subjob reap-stale --pool /scratch/.../pool --auto --older-than 120 --to failed
 ```
 
-Pick `--older-than` > your longest task walltime so you never reap live work.
-
-- **`reap-stale` uses file mtime as its only liveness signal** (Phase 0 has no
-  heartbeats). A task still legitimately running but older than `--older-than`
+- `--auto` uses **heartbeats** (`<pool>/.heartbeats/<worker_id>`) as the
+  primary liveness signal. Per-task `reason` strings reported in the JSON:
+  `owner_missing` (no heartbeat file for the stamped owner), `owner_stale_Ns`
+  (heartbeat older than the threshold), `legacy_mtime_Ns` (no `claimed_by`
+  stamp — pre-thrust claim, falls back to file mtime).
+- Without `--auto`, `reap-stale` **uses file mtime as its only liveness
+  signal**. A task still legitimately running but older than `--older-than`
   can be reaped and re-run *while the original is still executing* — set
   `--older-than` comfortably above your longest task's walltime, and rely on
-  restart-safe commands (§1.1) to make a rare double-run harmless.
+  restart-safe commands (§1.1) to make a rare double-run harmless. (With
+  `--auto` this concern is moot for stamped claims: heartbeats positively
+  identify the owner.)
 
 ---
 

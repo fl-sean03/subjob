@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import tempfile
 import time
 from collections.abc import Iterable, Iterator
@@ -37,6 +38,11 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 
 STATES = ("pending", "claimed", "done", "failed")
 
+# Per-pool dir holding `<worker_id>` files, each containing a single
+# `<unix_ns_timestamp>` line written atomically (tmp + os.rename). Hidden
+# subdir, mirroring `.local_workers`/`.staging` precedent.
+HEARTBEATS_DIRNAME = ".heartbeats"
+
 
 @dataclass
 class ClaimedTask:
@@ -47,7 +53,7 @@ class ClaimedTask:
 
 
 class Pool:
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, *, worker_id: str | None = None):
         self.root = Path(root)
         self.pending_dir = self.root / "pending"
         self.claimed_dir = self.root / "claimed"
@@ -55,7 +61,12 @@ class Pool:
         self.failed_dir = self.root / "failed"
         self.logs_dir = self.root / "logs"
         self.staging_dir = self.root / ".staging"
+        self.heartbeats_dir = self.root / HEARTBEATS_DIRNAME
         self.journal_path = self.root / "journal.jsonl"
+        # Optional worker identity. When set, claim() stamps a `claimed_by`
+        # attempt entry so reap-stale --auto knows which worker owns each
+        # claim. Default-None preserves bit-exact pre-thrust behavior.
+        self.worker_id = worker_id
         # Cache of parsed pending tasks keyed by filename → (mtime, Task).
         # Validated by mtime so a re-written file (e.g. a released task that
         # recorded an attempt) is re-read rather than served stale. Turns the
@@ -74,6 +85,7 @@ class Pool:
             self.failed_dir,
             self.logs_dir,
             self.staging_dir,
+            self.heartbeats_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
         self.journal_path.touch(exist_ok=True)
@@ -204,7 +216,14 @@ class Pool:
         return [p for p, _ in self.pending_tasks()]
 
     def claim(self, pending_path: Path) -> ClaimedTask | None:
-        """Try to claim a pending task. Returns the loaded task or None on race loss."""
+        """Try to claim a pending task. Returns the loaded task or None on race loss.
+
+        If ``self.worker_id`` is set, records an attempt entry
+        ``{"claimed_by": worker_id, "claimed_at": <iso>, "host": <hostname>}``
+        on the YAML BEFORE returning. This adds one file rewrite per claim but
+        gives reap-stale --auto a positive owner-identification signal so
+        recovery doesn't have to guess from mtime alone.
+        """
         target = self.claimed_dir / pending_path.name
         if not atomic_move(pending_path, target):
             return None
@@ -214,6 +233,20 @@ class Pool:
             # Corrupt YAML in claimed/ — bubble it out so the worker can decide.
             atomic_move(target, self.failed_dir / target.name)
             raise
+        if self.worker_id is not None:
+            stamp = {
+                "claimed_by": self.worker_id,
+                "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "host": socket.gethostname(),
+            }
+            task.attempts = list(task.attempts) + [stamp]
+            try:
+                target.write_text(task.to_yaml())
+            except OSError:
+                # If the stamp write fails, the claim is still valid (the file
+                # is in claimed/); recovery just falls back to mtime for this
+                # task. Don't fail the claim over a rewrite hiccup.
+                pass
         return ClaimedTask(task=task, path=target)
 
     def release(self, claimed: ClaimedTask, reason: str = "") -> bool:
@@ -242,6 +275,136 @@ class Pool:
             self.emit("task_released", task.id, {"reason": reason or "worker_shutdown"})
             return True
         return False
+
+    # ----- heartbeats -----
+
+    def write_heartbeat(self, worker_id: str, now_ns: int | None = None) -> None:
+        """Atomically refresh ``<pool>/.heartbeats/<worker_id>``.
+
+        Writes a single line containing the unix-ns timestamp via a
+        tmp-file + os.rename so a concurrent reader can never get a partial
+        value. Creates the heartbeats dir on demand so this is safe to call
+        before init() (it isn't normally, but be defensive).
+        """
+        self.heartbeats_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.time_ns() if now_ns is None else now_ns
+        target = self.heartbeats_dir / worker_id
+        # Use a sibling tmp file so os.rename stays on one filesystem.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{worker_id}.", suffix=".hb", dir=self.heartbeats_dir
+        )
+        try:
+            os.write(fd, f"{ts}\n".encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp_name, target)
+
+    def read_heartbeat_ns(self, worker_id: str) -> int | None:
+        """Return the heartbeat timestamp (ns) for a worker, or None if absent."""
+        path = self.heartbeats_dir / worker_id
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            return None
+        try:
+            return int(text.split()[0]) if text else None
+        except (ValueError, IndexError):
+            return None
+
+    def remove_heartbeat(self, worker_id: str) -> None:
+        """Best-effort heartbeat-file removal (called from worker shutdown)."""
+        try:
+            (self.heartbeats_dir / worker_id).unlink()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _last_claim_stamp(task: Task) -> dict[str, Any] | None:
+        """Return the most recent claim-stamp attempt for a task, or None."""
+        for a in reversed(task.attempts):
+            if "claimed_by" in a:
+                return a
+        return None
+
+    def auto_reap_stale(
+        self,
+        *,
+        threshold_s: float,
+        skip_worker_id: str | None = None,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Sweep ``claimed/`` and release tasks whose owner is gone or stale.
+
+        Behavior:
+          - If a claimed task has a ``claimed_by`` stamp matching
+            ``skip_worker_id``, it is skipped (a worker never reaps itself).
+          - If it has a ``claimed_by`` with no heartbeat file → reap with
+            reason ``owner_missing``.
+          - If it has a ``claimed_by`` with a heartbeat older than
+            ``threshold_s`` → reap with reason ``owner_stale_<N>s``.
+          - If it has NO ``claimed_by`` (legacy pre-thrust claim) → fall back
+            to file mtime; reap when ``now - mtime > threshold_s`` with reason
+            ``legacy_mtime_<N>s``.
+
+        Reaped tasks are moved back to ``pending/`` with a ``reaped_stale``
+        attempt entry and a ``task_released`` journal event. Returns one dict
+        per acted-on task with fields ``task_id``, ``reason``, ``moved_to``.
+        """
+        now = time.time() if now is None else now
+        results: list[dict[str, Any]] = []
+        if not self.claimed_dir.exists():
+            return results
+        for p in sorted(self.claimed_dir.iterdir()):
+            if p.suffix != ".yaml":
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            try:
+                task = Task.read(p)
+            except Exception:
+                # Corrupt claimed/ YAML — leave it for the operator path.
+                continue
+            stamp = self._last_claim_stamp(task)
+            reason: str | None = None
+            if stamp is not None:
+                owner = stamp.get("claimed_by")
+                if skip_worker_id is not None and owner == skip_worker_id:
+                    continue
+                hb_ns = self.read_heartbeat_ns(owner) if owner else None
+                if hb_ns is None:
+                    reason = "owner_missing"
+                else:
+                    age_s = now - (hb_ns / 1e9)
+                    if age_s > threshold_s:
+                        reason = f"owner_stale_{int(age_s)}s"
+            else:
+                age_s = now - mtime
+                if age_s > threshold_s:
+                    reason = f"legacy_mtime_{int(age_s)}s"
+            if reason is None:
+                continue
+            # Reap: record the attempt, then atomic-move back to pending/.
+            task.attempts = list(task.attempts) + [
+                {"reaped_stale": True, "reason": reason}
+            ]
+            try:
+                p.write_text(task.to_yaml())
+            except OSError:
+                continue
+            dest = self.pending_dir / p.name
+            if atomic_move(p, dest):
+                self._pending_cache.pop(p.name, None)
+                self.emit(
+                    "task_released",
+                    p.stem,
+                    {"reaped_stale": True, "reason": reason},
+                )
+                results.append(
+                    {"task_id": p.stem, "reason": reason, "moved_to": "pending"}
+                )
+        return results
 
     @staticmethod
     def release_attempt_count(task: Task) -> int:

@@ -352,6 +352,34 @@ def test_follow_until_done_times_out_with_no_worker(tmp_path):
         pool.follow_until_done(timeout_s=0.5, poll_interval=0.05)
 
 
+def test_pool_claim_stamps_owner_when_worker_id_set(tmp_path):
+    """When Pool(worker_id=...) is set, claim() records a claimed_by attempt."""
+    pool = Pool(tmp_path / "p", worker_id="w1")
+    pool.init()
+    pool.submit(Task(id="t1", command="echo hi"))
+    claimed = pool.claim(pool.pending_dir / "t1.yaml")
+    assert claimed is not None
+    # Re-read from disk to confirm the stamp was persisted (not just in-memory).
+    t = Task.read(pool.claimed_dir / "t1.yaml")
+    assert t.attempts, "claim should record an attempt entry"
+    last = t.attempts[-1]
+    assert last["claimed_by"] == "w1"
+    assert "claimed_at" in last
+    assert "host" in last
+
+
+def test_pool_claim_no_stamp_when_worker_id_none(tmp_path):
+    """Default Pool (no worker_id) must NOT add a claimed_by attempt — preserves legacy behavior."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(Task(id="t1", command="echo hi"))
+    claimed = pool.claim(pool.pending_dir / "t1.yaml")
+    assert claimed is not None
+    t = Task.read(pool.claimed_dir / "t1.yaml")
+    # No attempt should mention claimed_by
+    assert not any("claimed_by" in a for a in t.attempts)
+
+
 def test_read_journal_skips_truncated_line_between_valid_events(tmp_path):
     pool = Pool(tmp_path / "p")
     pool.init()

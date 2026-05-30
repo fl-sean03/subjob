@@ -62,14 +62,18 @@ def main(argv: list[str] | None = None) -> int:
 
     p_reap = sub.add_parser(
         "reap-stale",
-        help="Recover tasks stuck in claimed/ from a dead worker (manual; Phase 0 has no heartbeats)",
+        help="Recover tasks stuck in claimed/ from a dead worker (mtime-based; --auto uses heartbeats)",
     )
     p_reap.add_argument("--pool", required=True)
     p_reap.add_argument(
         "--older-than",
         type=float,
-        required=True,
-        help="Reap claimed tasks whose file mtime is older than this many seconds",
+        default=None,
+        help=(
+            "Mtime threshold in seconds (default mode). With --auto, instead "
+            "the heartbeat-staleness threshold (default 120s = 4× the worker "
+            "heartbeat interval)."
+        ),
     )
     p_reap.add_argument(
         "--to",
@@ -81,6 +85,15 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="List what would be reaped without moving anything",
+    )
+    p_reap.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "Use heartbeat-based liveness: reap claims whose owner worker has "
+            "no heartbeat file or a heartbeat older than --older-than. Falls "
+            "back to mtime for legacy claims with no owner stamp."
+        ),
     )
     p_reap.set_defaults(func=cmd_reap_stale)
 
@@ -196,22 +209,97 @@ def cmd_cancel(args) -> int:
 def cmd_reap_stale(args) -> int:
     """Move tasks stuck in claimed/ (dead worker) back to pending/ or failed/.
 
-    Phase 0 has no heartbeats, so a worker whose node dies leaves its claims
-    orphaned. This is the manual operator recovery path: anything in claimed/
-    older than --older-than is reaped. Use a threshold safely larger than your
-    longest task's walltime so you don't reap live work.
+    Two modes:
+
+    - Default (mtime): anything in claimed/ older than --older-than is reaped.
+      Use a threshold safely larger than your longest task's walltime so you
+      don't reap live work.
+    - --auto: heartbeat-based. For each claim, look up the owner worker's
+      heartbeat file: missing → reap (owner_missing); older than --older-than
+      → reap (owner_stale_*s). Legacy claims with no owner stamp fall back to
+      mtime (legacy_mtime_*s). Default --older-than for --auto is 120s
+      (4× the worker heartbeat interval).
     """
     pool = Pool(args.pool)
     now = time.time()
-    reaped = []
-    for p in sorted(pool.claimed_dir.iterdir()) if pool.claimed_dir.exists() else []:
+    # Default threshold differs between modes.
+    if args.older_than is None:
+        threshold = 120.0 if args.auto else None
+        if threshold is None:
+            print(json.dumps({"error": "--older-than is required (no default in mtime mode)"}))
+            return 2
+    else:
+        threshold = args.older_than
+
+    reaped: list[dict] = []
+    if not pool.claimed_dir.exists():
+        _emit(args.format, {"reaped": reaped, "count": 0, "dry_run": args.dry_run})
+        return 0
+
+    if args.auto:
+        # Heartbeat-driven path. Preview mode classifies but doesn't move.
+        for p in sorted(pool.claimed_dir.iterdir()):
+            if p.suffix != ".yaml":
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            try:
+                task = Task.read(p)
+            except (OSError, ValueError) as e:
+                reaped.append({"task_id": p.stem, "error": f"unreadable: {e}"})
+                continue
+            stamp = Pool._last_claim_stamp(task)
+            reason: str | None = None
+            if stamp is not None:
+                owner = stamp.get("claimed_by")
+                hb_ns = pool.read_heartbeat_ns(owner) if owner else None
+                if hb_ns is None:
+                    reason = "owner_missing"
+                else:
+                    age_s = now - (hb_ns / 1e9)
+                    if age_s > threshold:
+                        reason = f"owner_stale_{int(age_s)}s"
+            else:
+                age_s = now - mtime
+                if age_s > threshold:
+                    reason = f"legacy_mtime_{int(age_s)}s"
+            if reason is None:
+                continue
+            if args.dry_run:
+                reaped.append(
+                    {"task_id": p.stem, "reason": reason, "action": "would-reap"}
+                )
+                continue
+            dest_dir = pool.pending_dir if args.to == "pending" else pool.failed_dir
+            try:
+                payload: dict = {"reaped_stale": True, "reason": reason}
+                if args.to == "failed":
+                    task.state = "failed"
+                task.attempts = list(task.attempts) + [payload]
+                p.write_text(task.to_yaml())
+                os.rename(p, dest_dir / p.name)
+                pool._pending_cache.pop(p.name, None)
+                event = "task_released" if args.to == "pending" else "task_failed"
+                pool.emit(event, p.stem, payload)
+                reaped.append(
+                    {"task_id": p.stem, "reason": reason, "moved_to": args.to}
+                )
+            except (OSError, ValueError) as e:
+                reaped.append({"task_id": p.stem, "error": str(e)})
+        _emit(args.format, {"reaped": reaped, "count": len(reaped), "dry_run": args.dry_run})
+        return 0
+
+    # Legacy mtime path — unchanged behavior.
+    for p in sorted(pool.claimed_dir.iterdir()):
         if p.suffix != ".yaml":
             continue
         try:
             age = now - p.stat().st_mtime
         except OSError:
             continue
-        if age < args.older_than:
+        if age < threshold:
             continue
         if args.dry_run:
             reaped.append({"task_id": p.stem, "age_s": round(age, 1), "action": "would-reap"})

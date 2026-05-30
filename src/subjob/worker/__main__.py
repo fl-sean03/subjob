@@ -32,6 +32,24 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Exit after this many idle seconds (default: never)",
     )
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=30.0,
+        help="Seconds between heartbeat-file updates (0 to disable; default: 30)",
+    )
+    parser.add_argument(
+        "--auto-reap-interval",
+        type=float,
+        default=120.0,
+        help="Seconds between auto-reap sweeps for dead-worker claims (0 to disable; default: 120)",
+    )
+    parser.add_argument(
+        "--auto-reap-threshold",
+        type=float,
+        default=None,
+        help="Heartbeat staleness threshold for auto-reap (default: 4× heartbeat interval)",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -41,11 +59,16 @@ def main(argv: list[str] | None = None) -> int:
     caps = Capabilities.from_env(
         cores=args.cores, gpus=args.gpus, walltime_seconds=args.walltime_seconds
     )
+    heartbeat = args.heartbeat_interval if args.heartbeat_interval > 0 else None
+    auto_reap = args.auto_reap_interval if args.auto_reap_interval > 0 else None
     worker = Worker(
         pool,
         caps,
         poll_interval=args.poll_interval,
         idle_timeout_s=args.idle_timeout,
+        heartbeat_interval_s=heartbeat,
+        auto_reap_interval_s=auto_reap,
+        auto_reap_threshold_s=args.auto_reap_threshold,
     )
     worker.run()
     return 0

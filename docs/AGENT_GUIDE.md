@@ -91,6 +91,14 @@ subjob failures --pool /scratch/.../pool --task-id snap_005
 3. Decide a fix from the exit code + stderr tail, then re-submit a corrected task
    (or escalate to the user if the fix is destructive or the cause is unknown).
 
+Note on dead-worker claims: as of the heartbeats thrust, claims stamped by a
+worker whose node has died are auto-recovered by the next live worker's
+auto-sweep (released back to `pending/` with `reaped_stale: True` on the
+`task_released` event). You do not need to run `subjob reap-stale` manually as
+long as some worker is still polling the pool. If the entire cohort is gone,
+or you want to force an immediate sweep, run
+`subjob reap-stale --pool $POOL --auto --older-than 120`.
+
 ## Common patterns
 
 ### Pattern: per-snapshot analysis fan-out
