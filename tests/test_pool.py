@@ -501,6 +501,32 @@ def test_diagnose_priors_cached_across_calls(tmp_path):
     assert pool._priors is first_priors
 
 
+def test_diagnose_returns_error_dict_on_malformed_priors(tmp_path):
+    """A structurally bad priors.yaml must not raise out of diagnose.
+
+    The contract: diagnose() always returns a dict. A malformed priors
+    catalog surfaces as an `error` field with `verdict == "unknown"` —
+    callers can rely on never having to catch an exception.
+    """
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_a_task(pool, "boom", command="exit 7")
+    # `priors:` must be a list per the schema; a scalar should make
+    # load_priors() raise PriorSchemaError. diagnose() must swallow that.
+    (pool.root / "priors.yaml").write_text("priors: not-a-list\n")
+
+    result = pool.diagnose("boom")  # must NOT raise
+
+    assert "error" in result
+    assert "priors.yaml" in result["error"]
+    assert result["verdict"] == "unknown"
+    assert result["matches"] == []
+    assert result["suggested_fix"] is None
+    # Signal fields still populated from the failed task itself
+    assert result["task_id"] == "boom"
+    assert result["exit_code"] == 7
+
+
 def test_read_journal_skips_truncated_line_between_valid_events(tmp_path):
     pool = Pool(tmp_path / "p")
     pool.init()

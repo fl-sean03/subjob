@@ -59,7 +59,7 @@ After this you should be able to answer:
 - ❌ Priors integration / failure classification — Phase 1 (dogfood-driven)
 - ❌ Artifact validation — Phase 1
 - ❌ Cancellation API — Phase 1 (until someone asks)
-- ❌ Multi-pilot heartbeats / stale-lock recovery — Phase 1
+- ~~Multi-pilot heartbeats / stale-lock recovery~~ — **shipped 2026-05-30** (Cycle 2 Thrust 10; see `docs/sessions/2026-05-30_pre-dogfood-phase1-infra.md`)
 - ❌ Web UI / TUI — Phase 3
 - ❌ CCM backend — Phase 2
 - ❌ Database — never

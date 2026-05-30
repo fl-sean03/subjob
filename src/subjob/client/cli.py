@@ -244,8 +244,11 @@ def cmd_reap_stale(args) -> int:
     if args.older_than is None:
         threshold = 120.0 if args.auto else None
         if threshold is None:
-            print(json.dumps({"error": "--older-than is required (no default in mtime mode)"}))
-            return 2
+            _emit(
+                args.format,
+                {"error": "--older-than is required (no default in mtime mode)"},
+            )
+            return 1
     else:
         threshold = args.older_than
 
@@ -442,35 +445,44 @@ def cmd_diagnose(args) -> int:
         verdicts plus a count.
 
     Missing priors.yaml is NOT an error — the verdict is just "unknown"
-    with no matches.
+    with no matches. A MALFORMED priors.yaml surfaces as an `error` field
+    on the diagnose result (pool.diagnose() no longer raises); we promote
+    that to exit 1 so the operator sees a non-zero status.
     """
-    from subjob.lib.priors import PriorSchemaError
-
     pool = Pool(args.pool)
-    try:
-        if args.task_id:
-            result = pool.diagnose(args.task_id)
-            _emit(args.format, result)
-            return 0
-        # Batch mode: one-line entry per failed task.
-        items = []
-        for p in pool.list_state("failed"):
-            r = pool.diagnose(p.stem)
-            fix = r.get("suggested_fix") or ""
-            # Collapse to a single line for the batch summary.
-            fix_line = fix.strip().splitlines()[0] if fix.strip() else ""
-            items.append(
-                {
-                    "task_id": r["task_id"],
-                    "verdict": r["verdict"],
-                    "suggested_fix": fix_line,
-                }
-            )
-        _emit(args.format, {"diagnoses": items, "count": len(items)})
+    if args.task_id:
+        result = pool.diagnose(args.task_id)
+        _emit(args.format, result)
+        # Only "priors.yaml unreadable" errors warrant non-zero exit; an
+        # "task not in failed/" error is a legitimate lookup result.
+        if "error" in result and "priors.yaml" in result["error"]:
+            return 1
         return 0
-    except PriorSchemaError as e:
-        _emit(args.format, {"error": str(e)})
+    # Batch mode: one-line entry per failed task.
+    items = []
+    schema_error: str | None = None
+    for p in pool.list_state("failed"):
+        r = pool.diagnose(p.stem)
+        if "error" in r and "priors.yaml" in r["error"]:
+            # All subsequent diagnoses will hit the same broken priors.yaml;
+            # surface once and stop walking the failed list.
+            schema_error = r["error"]
+            break
+        fix = r.get("suggested_fix") or ""
+        # Collapse to a single line for the batch summary.
+        fix_line = fix.strip().splitlines()[0] if fix.strip() else ""
+        items.append(
+            {
+                "task_id": r["task_id"],
+                "verdict": r["verdict"],
+                "suggested_fix": fix_line,
+            }
+        )
+    if schema_error is not None:
+        _emit(args.format, {"error": schema_error})
         return 1
+    _emit(args.format, {"diagnoses": items, "count": len(items)})
+    return 0
 
 
 def _tail_bytes(path: Path, n: int) -> str:

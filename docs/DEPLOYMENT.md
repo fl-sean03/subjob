@@ -181,9 +181,16 @@ is the cluster's software env, not subjob):**
   multi-node MPI per task is out of scope; single-node MPI should work once
   the module env is set.
 
-**Phase 1/2 features** (DAG, priors/diagnose, artifact validation, CCM
-backend, heartbeats) are deliberately not implemented — see
-`validation/RESULTS.md` "Phase 1 / Phase 2" table.
+**Phase-1 infra pulled forward (Cycle 2, 2026-05-30):** task DAG /
+`depends_on` enforcement, artifact validation, heartbeats + automatic
+stale-claim recovery, and the priors framework / `pool.diagnose` are all
+now shipped. See `validation/RESULTS.md` Cycle 2 record for the commit
+hashes and verdict. The remaining roadmap (still deliberately deferred):
+CCM / Vast.ai cloud backend, multi-GPU type accounting, cost-aware
+backend selection, and `pool.read_artifact` (a one-call read+verify
+helper — note that validation itself is shipped). See
+`validation/RESULTS.md` "Phase 1 / Phase 2" table for the up-to-date
+list.
 
 ---
 

@@ -84,6 +84,25 @@ def test_text_format(tmp_path):
     assert "pending: 0" in r.stdout
 
 
+def test_reap_stale_text_format_error_path(tmp_path):
+    """Without --older-than (and without --auto), the error must route through
+    _emit so --format text yields text output, not raw JSON, and exit code 1
+    (matching the other cli error paths)."""
+    Pool(tmp_path / "p").init()
+    r = _run(["--format", "text", "reap-stale", "--pool", str(tmp_path / "p")])
+    assert r.returncode == 1, r.stderr
+    # Text format: "key: value" lines, NOT raw JSON
+    out = r.stdout.strip()
+    assert out.startswith("error: "), f"expected text-formatted error, got: {out!r}"
+    # Must not be parseable as JSON (it should be plain text)
+    try:
+        json.loads(out)
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError(f"expected text output, got JSON: {out!r}")
+
+
 def test_reap_stale_moves_old_claims(tmp_path):
     import os
     import time

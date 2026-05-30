@@ -102,19 +102,72 @@ itself dispatches them fine (proven by NAMD, which needs no modules).
 
 ## Phase 1 / Phase 2 — deliberately NOT implemented (anti-feature discipline)
 
-These were considered and intentionally left out of Phase 0/0.5 per
-`START_HERE.md §3` / `DEVELOPMENT.md`. They are roadmap, not gaps; each
-needs a real workload + a product decision before building. The code
-parses the relevant Task fields but the worker does not act on them.
+> The four Phase-1-flagged rows previously here (DAG / `depends_on`,
+> priors + `pool.diagnose`, artifact validation, heartbeats + auto
+> stale-claim recovery) **all landed in Cycle 2 on 2026-05-30** — see the
+> Cycle 2 record below for commit hashes. The remaining genuinely-deferred
+> roadmap is short:
 
 | Feature | Phase | Status today |
 |---|---|---|
-| Task DAG / `depends_on` enforcement | 2 | Parsed, NOT enforced. Stage manually with `follow_until_state` (documented in AGENT_GUIDE). |
-| Failure intelligence / priors + `pool.diagnose` | 1 | Not present. Triage via `subjob failures` / `read_task("failed")`. |
-| Artifact validation (`expect`/`success_marker`) | 1 | `artifacts` parsed, NOT validated — done = exit 0. |
-| Full GPU resource accounting | 2 | GPUs are a capacity counter only (passthrough works). |
+| Full GPU resource accounting (multi-GPU type / per-device) | 2 | GPUs are a capacity counter only (passthrough works). |
 | CCM / Vast.ai cloud backend | 2 | `Backend` protocol ready; no CCM impl (see CCM_INTEGRATION_ANALYSIS). |
-| Multi-pilot heartbeats / auto stale-claim recovery | 1 | Manual `reap-stale` only (no heartbeats by design). |
+| Cost-aware backend selection | 2 | Not designed. |
+| `pool.read_artifact(task_id, name)` (validated read-back helper) | 1 | Validation itself IS shipped (`artifacts.expect` / `success_marker` checked); a one-call read+verify helper is still future. |
+| Auto-applied priors mitigations (worker honors `priors_apply`) | 1+ | Parsed but inert. Use `subjob diagnose` to surface the suggested fix and apply it manually. |
+
+---
+
+## Cycle 2 — Phase-1 infra pull-forward + re-audit (2026-05-30, CONVERGED)
+
+Second outer-loop audit cycle under the ADL (`docs/AUTONOMOUS_DEV_LOOP.md`).
+Driven by the pre-dogfood directive: pull the highest-leverage Phase-1
+infra forward so the hydrogenation campaigns get DAG / heartbeats /
+artifact validation / diagnose out of the box, without speculating beyond
+real workload need.
+
+**Four thrusts landed (in order):**
+
+- **Thrust 8 — Artifact validation** (commit `1e2498c`): `artifacts.expect`
+  + `success_marker.contains` checked after exit 0; an exit-0 task that
+  didn't write its declared outputs is now a real failure with
+  `artifact_validation_failed=True` + an `artifact_detail` dict. +9 tests
+  (165 → 174).
+- **Thrust 9 — Task DAG / `depends_on` enforcement** (commit `68aad95`):
+  workers refuse to dispatch a dependent until all deps are in `done/`;
+  failed deps cascade (`dep_failed`); unknown deps get a **one-cycle grace**
+  on first sighting and fail-fast as `unknown_dep` on the second poll
+  (tolerates interleaved multi-process submitters). +29 tests (174 → 203).
+- **Thrust 10 — Heartbeats + auto stale-claim recovery** (commit `335b3ed`):
+  workers stamp claims with `claimed_by` + touch
+  `<pool>/.heartbeats/<worker_id>` every ~30s; live cohort-mates sweep
+  `claimed/` every ~120s and release claims whose owner has no/stale
+  heartbeat (`owner_missing` / `owner_stale_Ns` / legacy `legacy_mtime_Ns`
+  fallback). `subjob reap-stale --auto` is the operator escape hatch.
+- **Thrust 11 — Priors framework + `pool.diagnose`** (commit `bb264ae`):
+  per-pool optional `priors.yaml` catalog (advisory; `auto_apply` parsed
+  but inert in Phase 1). `pool.diagnose(task_id)` + `subjob diagnose` CLI
+  classify failures against the catalog and surface verdict + suggested
+  fix. +9 tests (203 → 212).
+
+**Cycle 2 re-audit (initial):** 1 P0, 9 P1, 10 P2, 5 P3.
+
+**Thrusts 12 + 13 (this session) closed all P0/P1s:**
+
+- **Thrust 12 (commit `64af868`):** P0 finalize/release race (rename-first
+  invariant restored; cross-worker resurrection class closed); 3 P1 code
+  fixes (auto-reap rename-first too, DAG one-cycle grace for unknown deps,
+  release-marker no-resurrect).
+- **Thrust 13 (this commit):** the six P1 doc-staleness sweeps (README /
+  START_HERE / ARCHITECTURE / DEPLOYMENT / AGENT_GUIDE / RESULTS), plus
+  one P1 code fix in `Pool.diagnose` (structured error dict on malformed
+  `priors.yaml` instead of an uncaught raise), and one P2 (`cmd_reap_stale`
+  error path now routes through `_emit`).
+
+**Cycle 2 verdict after T12 + T13: 0 P0 / 0 P1.** Test count
+progression: 165 → 174 (T8) → 203 (T9) → 212 (T11, T10 added no new
+tests as its infrastructure was tested in T11's diagnose path tests + an
+auto-reap unit test) → **214 (T13's +2)**. ruff clean throughout.
 
 ---
 

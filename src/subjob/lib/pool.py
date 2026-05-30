@@ -26,8 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from subjob.lib import yaml_lite
 from subjob.lib.lock import atomic_move
-from subjob.lib.priors import Prior, load_priors, match_priors
+from subjob.lib.priors import Prior, PriorSchemaError, load_priors, match_priors
 from subjob.lib.task import Task
 
 try:
@@ -196,6 +197,11 @@ class Pool:
 
         Phase-1 scope: advisory only. The ``auto_apply`` field on matched
         priors is surfaced in ``matches`` but the worker does not act on it.
+
+        Never raises: a malformed / unreadable ``priors.yaml`` (or any other
+        unexpected failure inside this method) is reported as an ``error``
+        field on the returned dict with ``verdict == "unknown"``, so callers
+        can rely on always getting a structured result back.
         """
         failed_path = self.failed_dir / f"{task_id}.yaml"
         if not failed_path.exists():
@@ -237,7 +243,24 @@ class Pool:
         if walltime_killed is not None and not isinstance(walltime_killed, bool):
             walltime_killed = bool(walltime_killed)
         stderr_tail = self._tail_err(task_id, max_bytes=16 * 1024)
-        priors = self._load_priors_once()
+        try:
+            priors = self._load_priors_once()
+        except (PriorSchemaError, yaml_lite.ParseError, OSError) as e:
+            # A malformed / unreadable priors.yaml MUST NOT raise out of
+            # diagnose — we promise a structured result on every call.
+            # Surface the problem as an `error` field; verdict stays
+            # "unknown" so callers can short-circuit cleanly.
+            return {
+                "task_id": task_id,
+                "error": f"priors.yaml unreadable: {e}",
+                "verdict": "unknown",
+                "matches": [],
+                "suggested_fix": None,
+                "exit_code": exit_code,
+                "walltime_killed": walltime_killed,
+                "stderr_tail": stderr_tail,
+                "priors_apply": list(task.priors_apply),
+            }
         matches = match_priors(
             priors,
             exit_code=exit_code,

@@ -268,6 +268,10 @@ subjob diagnose --pool $POOL --task-id snap_005
 #    "stderr_tail": "...", "matches": [{...prior...}],
 #    "verdict": "needs-mitigation", "suggested_fix": "...",
 #    "priors_apply": []}
+
+# Empty pool (no failed tasks): not an error, just an empty list.
+subjob diagnose --pool $POOL
+# → {"diagnoses": [], "count": 0}
 ```
 
 ### Python
@@ -291,10 +295,17 @@ isn't in `failed/`, the dict has `error: "task not in failed/"` and
 These are **parsed but not acted on**, or not present at all. Don't rely on
 them yet:
 
-- `pool.read_artifact(task_id, name)` — *Phase 1* — validated read of a task's
-  declared artifact. Until then, read the result file your task wrote directly
-  (you control the command and output path).
+- `pool.read_artifact(task_id, name)` — *Phase 1* — a one-call validated
+  artifact read-back helper. **Note:** artifact VALIDATION itself **is**
+  shipped (see the "Artifact validation" section above) — what's still
+  future is a helper that reads + verifies in one call. Until then, read
+  the result file your task wrote directly (you control the command and
+  output path).
 - Auto-applied priors mitigations — *Phase 1+* — `auto_apply: true` on a
   prior and the `priors_apply` field on a Task are parsed but the worker does
   not act on them. Use `subjob diagnose` to surface the suggested fix and
   apply it manually.
+- CCM / Vast.ai cloud backend — *Phase 2* — the `Backend` protocol is ready
+  but no CCM implementation exists yet.
+- Multi-GPU type / per-device accounting — *Phase 2* — GPUs are a capacity
+  counter only today; passthrough works for single-type clusters.
