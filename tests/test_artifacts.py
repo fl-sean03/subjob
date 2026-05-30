@@ -158,3 +158,47 @@ def test_tilde_expansion_with_env_home(tmp_path):
     )
     assert ok is True
     assert detail["expect_checked"][0] == str(tmp_path / "marker.txt")
+
+
+def test_expand_missing_var_left_literal(tmp_path, monkeypatch):
+    """A `${VAR}` not in the task env must NOT fall back to os.environ —
+    even if the worker process happens to have it set. The contract is
+    "task env only" so a missing var produces a real validation failure
+    rather than silently succeeding against an unintended worker-env value.
+    """
+    # Set the var in the worker process env; it must NOT leak through.
+    monkeypatch.setenv("MISSING_VAR_42", str(tmp_path))
+    # Create a file at the literal "${MISSING_VAR_42}/probe.txt" path —
+    # but the validator should look at the unexpanded literal, which won't
+    # exist under workdir.
+    ok, detail = validate_artifacts(
+        {"expect": ["${MISSING_VAR_42}/probe.txt"]},
+        env={},
+        workdir=str(tmp_path),
+    )
+    assert ok is False
+    assert "missing_expect" in detail
+    # The path the validator checked must still contain the literal token,
+    # confirming no os.environ fallback fired.
+    assert "${MISSING_VAR_42}" in detail["missing_expect"][0]
+
+
+def test_expand_task_env_takes_precedence_over_worker_env(tmp_path, monkeypatch):
+    """When the task env defines a var, it wins — even if os.environ has
+    a different value for the same name. (Belt-and-suspenders for the
+    "task env is authoritative" contract.)"""
+    # Worker env has a misleading value.
+    monkeypatch.setenv("SNAP_DIR", "/nonexistent/worker/path")
+    # Task env points to the real dir.
+    real_snap = tmp_path / "real_snap"
+    real_snap.mkdir()
+    (real_snap / "out.dcd").write_text("frames")
+    ok, detail = validate_artifacts(
+        {"expect": ["$SNAP_DIR/out.dcd"]},
+        env={"SNAP_DIR": str(real_snap)},
+        workdir=None,
+    )
+    assert ok is True, detail
+    assert detail["expect_checked"][0] == str(real_snap / "out.dcd")
+    # And the misleading worker-env value must NOT appear anywhere.
+    assert "/nonexistent/worker/path" not in detail["expect_checked"][0]

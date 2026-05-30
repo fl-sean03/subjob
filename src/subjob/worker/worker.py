@@ -168,6 +168,13 @@ class Worker:
         self._executor: ThreadPoolExecutor | None = None
         self._last_heartbeat: float = 0.0
         self._last_auto_reap: float = 0.0
+        # One-cycle grace for unknown_dep: when a pending task references a dep
+        # we can't find anywhere (done/failed/claimed/pending), we record its
+        # id here and SKIP it for this dispatch cycle. Only on the SECOND
+        # sighting (next poll) do we fast-fail it as `unknown_dep`. This
+        # tolerates multi-process submitters that interleave deps and
+        # dependents — a dep that lands within ~1 poll interval is fine.
+        self._unknown_dep_seen: set[str] = set()
 
     # ----- main loop -----
 
@@ -284,6 +291,12 @@ class Worker:
         # pending_tasks() returns cached (path, Task) pairs — no re-read here.
         # Corrupt-YAML quarantine is handled inside pending_tasks().
         pending = self.pool.pending_tasks()
+        # Prune the unknown-dep grace tracker so we don't accumulate ids
+        # across submissions — once a task leaves pending/ it's no longer
+        # relevant. This also handles the case where the dep landed and the
+        # dependent moved on cleanly.
+        pending_ids_for_prune = {p.stem for p, _ in pending}
+        self._unknown_dep_seen &= pending_ids_for_prune
         # DAG dep-state lookup: compute terminal-state sets ONCE per dispatch
         # cycle so a fan-in/fan-out batch doesn't restat the same dirs per task.
         # Per-task pre-claim gate (Phase-1 pull-forward) — no graph datastructure
@@ -337,14 +350,20 @@ class Worker:
                         deps_pending = True
                         continue
                     # Not terminal, not in-flight, not queued — typo or
-                    # never-submitted. Fail-fast so we don't starve the queue
-                    # waiting for something that will never arrive.
+                    # never-submitted. One-cycle grace: skip this cycle and
+                    # only fast-fail if we still can't find it next cycle.
+                    # See self._unknown_dep_seen (in __init__) for rationale.
                     dep_action = ("unknown", dep_id)
                     break
                 if dep_action is not None:
+                    kind, dep_id = dep_action
+                    if kind == "unknown" and peek.id not in self._unknown_dep_seen:
+                        # First sighting: record + skip. The dep may yet
+                        # arrive (multi-process submitters often interleave).
+                        self._unknown_dep_seen.add(peek.id)
+                        continue
                     claimed = self.pool.claim(path)
                     if claimed is not None:
-                        kind, dep_id = dep_action
                         if kind == "cascade":
                             payload = {
                                 "dep_failed": dep_id,

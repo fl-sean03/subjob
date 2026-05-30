@@ -186,3 +186,23 @@ def test_rejects_multidoc():
 def test_rejects_flow_map_with_content():
     with pytest.raises(yaml_lite.ParseError):
         yaml_lite.loads("x: {a: 1}")
+
+
+def test_double_quoted_unknown_escape_preserved():
+    """Unknown backslash escapes in double-quoted scalars must pass through
+    with the backslash intact — priors authors write "\\d+" expecting "\\d+".
+    """
+    # "\d+" in YAML source → r"\d+" in Python (3 chars: \, d, +).
+    result = yaml_lite.loads(r'x: "\d+"')
+    assert result == {"x": r"\d+"}
+    assert len(result["x"]) == 3
+
+
+def test_double_quoted_known_escapes_still_work():
+    """Known C-style escapes still decode."""
+    result = yaml_lite.loads(r'x: "a\nb"')
+    assert result == {"x": "a\nb"}
+    assert len(result["x"]) == 3
+    assert yaml_lite.loads(r'x: "a\tb"') == {"x": "a\tb"}
+    assert yaml_lite.loads(r'x: "a\\b"') == {"x": "a\\b"}
+    assert yaml_lite.loads(r'x: "a\"b"') == {"x": 'a"b'}

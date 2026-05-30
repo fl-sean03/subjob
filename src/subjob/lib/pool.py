@@ -364,29 +364,40 @@ class Pool:
     def release(self, claimed: ClaimedTask, reason: str = "") -> bool:
         """Move a claimed task back to pending, recording a release attempt.
 
-        Records an attempt marker in the YAML before moving so a re-claiming
-        worker can see how many times this task has been released (used to
-        cap infinite walltime-bounce — see Worker._dispatch_pending).
+        Rename-first, rewrite-after: we atomically rename the claimed file
+        into pending/ BEFORE writing the updated YAML. The loser of any
+        cross-worker race (auto-reap, another finalize, another release)
+        gets ``False`` from ``atomic_move`` and no-ops without ever
+        re-creating the file. After the rename, we own the destination
+        path exclusively and rewrite it with the release attempt recorded.
+
+        Readers that race with the rewrite see the pre-rewrite YAML (the
+        old content without the release marker); the dir membership is
+        authoritative for state, so this brief window is acceptable.
         """
-        # If the claim was already finalized (moved out of claimed/) by another
-        # path, do nothing — never re-create the file or resurrect the task.
+        # Cheap pre-check: avoids a useless rename attempt when the claim
+        # was already finalized by another path. Still safe — the atomic
+        # rename below is the load-bearing exclusion.
         if not claimed.path.exists():
             return False
+        dest = self.pending_dir / claimed.path.name
+        if not atomic_move(claimed.path, dest):
+            return False
+        # We own `dest` exclusively now; rewrite with the release attempt.
         task = claimed.task
         task.attempts = list(task.attempts) + [
             {"released": True, "reason": reason or "worker_shutdown"}
         ]
         try:
-            claimed.path.write_text(task.to_yaml())
+            dest.write_text(task.to_yaml())
         except OSError:
+            # Best-effort: the task is in the right dir; failing the rewrite
+            # only loses the released-attempt marker, not the task itself.
             pass
-        dest = self.pending_dir / claimed.path.name
-        if atomic_move(claimed.path, dest):
-            # Invalidate any stale cache entry; the file's content changed.
-            self._pending_cache.pop(claimed.path.name, None)
-            self.emit("task_released", task.id, {"reason": reason or "worker_shutdown"})
-            return True
-        return False
+        # Invalidate any stale cache entry; the file's content changed.
+        self._pending_cache.pop(claimed.path.name, None)
+        self.emit("task_released", task.id, {"reason": reason or "worker_shutdown"})
+        return True
 
     # ----- heartbeats -----
 
@@ -497,25 +508,34 @@ class Pool:
                     reason = f"legacy_mtime_{int(age_s)}s"
             if reason is None:
                 continue
-            # Reap: record the attempt, then atomic-move back to pending/.
+            # Reap: rename-first, then rewrite at destination. If another
+            # writer (the owning worker's late finalize, a concurrent reap
+            # from a sibling worker) raced us, ``atomic_move`` returns False
+            # and we skip this entry — the loser of the rename never
+            # re-creates the file at the source path.
+            dest = self.pending_dir / p.name
+            if not atomic_move(p, dest):
+                continue
+            # We own `dest` now; record the reap attempt on the YAML.
             task.attempts = list(task.attempts) + [
                 {"reaped_stale": True, "reason": reason}
             ]
             try:
-                p.write_text(task.to_yaml())
+                dest.write_text(task.to_yaml())
             except OSError:
-                continue
-            dest = self.pending_dir / p.name
-            if atomic_move(p, dest):
-                self._pending_cache.pop(p.name, None)
-                self.emit(
-                    "task_released",
-                    p.stem,
-                    {"reaped_stale": True, "reason": reason},
-                )
-                results.append(
-                    {"task_id": p.stem, "reason": reason, "moved_to": "pending"}
-                )
+                # Best-effort: task is in the right dir; failing the rewrite
+                # only loses the reap marker, not the move. Continue so the
+                # journal event + result are still recorded.
+                pass
+            self._pending_cache.pop(p.name, None)
+            self.emit(
+                "task_released",
+                p.stem,
+                {"reaped_stale": True, "reason": reason},
+            )
+            results.append(
+                {"task_id": p.stem, "reason": reason, "moved_to": "pending"}
+            )
         return results
 
     @staticmethod
@@ -530,18 +550,31 @@ class Pool:
         self._finalize(claimed, "failed", "task_failed", payload)
 
     def _finalize(self, claimed: ClaimedTask, state: str, event_type: str, payload: dict) -> None:
-        # If the claim was already finalized (moved out of claimed/) by another
-        # path, do nothing — re-writing the file here would resurrect the task
-        # into a second state dir (or re-run it). The first finalize wins.
+        # Rename-first, rewrite-after: atomically move the claimed file to its
+        # destination dir BEFORE writing the updated YAML. If another writer
+        # (a concurrent finalize, an auto-reap on another worker, a release)
+        # raced us and the file already moved, ``atomic_move`` returns False
+        # and we no-op. "First finalize wins" is now defined as "won the
+        # rename," not "got past the .exists() guard" — this closes the
+        # cross-worker resurrection class because ``write_text`` no longer
+        # runs against a possibly-vanished path; it runs against the
+        # destination we just took ownership of.
+        #
+        # Readers that race with the rewrite see the pre-rewrite YAML (the
+        # old ``state="claimed"`` value for a now-``done`` file) for a tiny
+        # window; the dir membership is authoritative for status, so this
+        # is acceptable.
         if not claimed.path.exists():
+            return  # cheap pre-check; avoids a useless rename attempt
+        dest_dir = self.done_dir if state == "done" else self.failed_dir
+        target = dest_dir / claimed.path.name
+        if not atomic_move(claimed.path, target):
             return
+        # We own `target` exclusively now; rewrite with updated state + attempt.
         task = claimed.task
         task.state = state
         task.attempts = list(task.attempts) + [payload]
-        # Rewrite the YAML in-place under claimed/, then move it atomically.
-        claimed.path.write_text(task.to_yaml())
-        dest_dir = self.done_dir if state == "done" else self.failed_dir
-        os.rename(claimed.path, dest_dir / claimed.path.name)
+        target.write_text(task.to_yaml())
         self.emit(event_type, task.id, payload)
 
     # ----- journal -----

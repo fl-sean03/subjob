@@ -692,3 +692,64 @@ def test_worker_sigterm_releases_inflight_task(tmp_path):
     assert s["failed"] == 0, s
     types = [e["type"] for e in pool.read_journal()]
     assert "task_released" in types
+
+
+def test_dag_unknown_dep_grace_one_cycle(tmp_path):
+    """Submit B(depends_on=A) before A. A late-arrival within one poll cycle
+    must still complete cleanly — the worker grants a one-cycle grace before
+    failing the dependent with unknown_dep."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    # B first — its dep doesn't exist yet.
+    pool.submit(
+        Task(id="B", command="echo B", resources=Resources(cores=1), depends_on=["A"])
+    )
+
+    # Start the worker; A arrives via a background thread within ~1 poll cycle
+    # of the first sighting. With poll_interval=0.5, a ~0.4s delay lands A
+    # before the SECOND poll that would otherwise fast-fail B as unknown_dep.
+    def _late_submit():
+        time.sleep(0.4)
+        pool.submit(Task(id="A", command="echo A", resources=Resources(cores=1)))
+
+    submitter = threading.Thread(target=_late_submit)
+    submitter.start()
+    Worker(
+        pool,
+        Capabilities(cores=2, host="t"),
+        poll_interval=0.5,
+        idle_timeout_s=3.0,
+    ).run()
+    submitter.join()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 2, "failed": 0}, s
+    # Confirm ordering: A finished before B.
+    done_events = [
+        (e["task_id"], e["event_id"])
+        for e in pool.read_journal()
+        if e["type"] == "task_done"
+    ]
+    by_id = dict(done_events)
+    assert by_id["A"] < by_id["B"]
+
+
+def test_dag_unknown_dep_fails_after_grace_if_dep_never_arrives(tmp_path):
+    """B(depends_on=['ghost']) submitted alone — ghost never arrives. B must
+    end up in failed/ with unknown_dep, AFTER one grace cycle has passed."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    pool.submit(
+        Task(id="B", command="echo B", resources=Resources(cores=1), depends_on=["ghost"])
+    )
+    Worker(
+        pool,
+        Capabilities(cores=2, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=1.0,
+    ).run()
+    s = pool.status()
+    assert s == {"pending": 0, "claimed": 0, "done": 0, "failed": 1}, s
+    b = pool.read_task("failed", "B")
+    last = b.attempts[-1]
+    assert last.get("unknown_dep") == "ghost"
+    assert "ghost" in last.get("error", "")

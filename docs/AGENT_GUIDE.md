@@ -134,6 +134,14 @@ the failure to its dependents (recorded with `dep_failed: <id>` on the
 dependent's attempt). A `depends_on` id that was never submitted fails
 the dependent fast with `unknown_dep: <id>` rather than starving the queue.
 
+Prefer submitting deps before dependents. The worker grants a **one-cycle
+grace** on unknown deps — if a dep can't be found anywhere on the first
+sighting, the dependent is skipped (not failed); only on the SECOND poll
+do we record `unknown_dep`. This tolerates multi-process submitters that
+interleave deps and dependents, as long as the dep lands within ~1 poll
+interval. If a dep takes longer than that to appear, the dependent fails
+fast.
+
 ```python
 pool = Pool(...)
 pool.ensure_workers(backend="slurm", count=4, cores=32, partition="amilan", qos="normal")

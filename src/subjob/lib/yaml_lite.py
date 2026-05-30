@@ -305,12 +305,22 @@ def _parse_double_quoted(s: str, line_no: int) -> str:
         raise ParseError(f"line {line_no}: unterminated double-quoted string")
     body = s[1:-1]
     out: list[str] = []
+    # Known C-style escapes get decoded; unknown escapes pass through with the
+    # backslash intact. This is friendlier to regex authors who write priors
+    # like "\d+" in a double-quoted YAML scalar and expect "\d+" out (not "d+").
+    # YAML 1.2 reserves a wider escape set; we cover the practical cases and
+    # treat anything else as a literal backslash + char.
+    escape_map = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"'}
     i = 0
     while i < len(body):
         c = body[i]
         if c == "\\" and i + 1 < len(body):
             nxt = body[i + 1]
-            out.append({"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"'}.get(nxt, nxt))
+            if nxt in escape_map:
+                out.append(escape_map[nxt])
+            else:
+                # Passthrough: e.g. "\d" stays "\d" so regex priors round-trip.
+                out.append("\\" + nxt)
             i += 2
         else:
             out.append(c)

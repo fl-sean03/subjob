@@ -111,6 +111,12 @@ def _expand(s: str, env: dict[str, str]) -> str:
     """Expand $VAR / ${VAR} from ``env``, then ``~`` from env's HOME.
 
     Unknown variables are left as-is (mirroring ``os.path.expandvars``).
+
+    Task env is the ONLY source — we do NOT fall back to ``os.environ``.
+    This matches the documented contract (module docstring + AGENT_GUIDE
+    "Artifact validation" section): a missing ``${VAR}`` is a real artifact
+    validation failure (the resulting path won't exist), not a silent
+    success against a worker-process env var the task author didn't intend.
     """
 
     def _sub(m: re.Match[str]) -> str:
@@ -119,8 +125,6 @@ def _expand(s: str, env: dict[str, str]) -> str:
         name = m.group(2) or m.group(3)
         if name in env:
             return env[name]
-        if name in os.environ:
-            return os.environ[name]
         return m.group(0)
 
     expanded = _VAR_PATTERN.sub(_sub, s)

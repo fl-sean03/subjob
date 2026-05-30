@@ -512,3 +512,80 @@ def test_read_journal_skips_truncated_line_between_valid_events(tmp_path):
     events = pool.read_journal()
     assert [e["task_id"] for e in events] == ["a", "b"]
     assert len(events) == 2
+
+
+# ---- Cross-worker race tests (rename-first invariant) ----
+#
+# These three tests directly simulate the T10 race that Auditor A surfaced:
+# a worker calls finalize/release/auto_reap while ANOTHER writer has already
+# renamed the claimed file out from under it. The rename-first pattern
+# (atomic_move BEFORE write_text) guarantees the loser of the race no-ops
+# instead of resurrecting the file in two state dirs.
+
+
+def test_finalize_no_resurrect_when_another_writer_renames_first(tmp_path):
+    """If another writer renames the claimed file before _finalize runs, the
+    finalize must no-op — never resurrect the task into done/ or claimed/."""
+    import os as _os
+
+    pool = Pool(tmp_path / "p")
+    pool.submit(_mktask("t1"))
+    claimed = pool.claim(pool.pending_paths()[0])
+    # Race: another writer atomically moves the claimed file to pending/
+    # (simulating an auto-reap on a sibling worker) before we commit_done.
+    racing_dest = pool.pending_dir / claimed.path.name
+    _os.rename(claimed.path, racing_dest)
+    # commit_done should not raise and should not resurrect the file.
+    pool.commit_done(claimed, {"exit_code": 0})
+    assert (pool.pending_dir / "t1.yaml").exists()
+    assert not (pool.done_dir / "t1.yaml").exists()
+    assert not (pool.claimed_dir / "t1.yaml").exists()
+    assert pool.status() == {"pending": 1, "claimed": 0, "done": 0, "failed": 0}
+
+
+def test_release_no_resurrect_when_another_writer_renames_first(tmp_path):
+    """If another writer renames the claimed file before release() runs,
+    release must return False and not resurrect the file in pending/."""
+    import os as _os
+
+    pool = Pool(tmp_path / "p")
+    pool.submit(_mktask("t1"))
+    claimed = pool.claim(pool.pending_paths()[0])
+    # Another writer wins: moves claimed → done/ before our release.
+    racing_dest = pool.done_dir / claimed.path.name
+    _os.rename(claimed.path, racing_dest)
+    assert pool.release(claimed, reason="shutdown") is False
+    assert (pool.done_dir / "t1.yaml").exists()
+    assert not (pool.pending_dir / "t1.yaml").exists()
+    assert not (pool.claimed_dir / "t1.yaml").exists()
+    assert pool.status() == {"pending": 0, "claimed": 0, "done": 1, "failed": 0}
+
+
+def test_auto_reap_stale_no_resurrect_when_another_writer_renames_first(tmp_path):
+    """If the owning worker finalizes the claimed file while auto_reap_stale
+    is mid-flight, the reap must skip that file rather than resurrecting it
+    into pending/."""
+    import os as _os
+    import time as _time
+
+    # Use a worker_id so the claim is stamped and the reap codepath uses the
+    # owner-missing branch (no heartbeat) rather than legacy mtime.
+    pool = Pool(tmp_path / "p", worker_id="ghost-worker")
+    pool.submit(_mktask("t1"))
+    claimed = pool.claim(pool.pending_paths()[0])
+    # The owner is "ghost-worker" with no heartbeat file → auto_reap would
+    # normally reap this with reason "owner_missing". Simulate a concurrent
+    # finalize landing the file in done/ between auto_reap_stale's iterdir()
+    # and its atomic_move. We do this by renaming the file out from under
+    # the reap, then calling auto_reap_stale with a path that's already gone.
+    racing_dest = pool.done_dir / claimed.path.name
+    _os.rename(claimed.path, racing_dest)
+    # Use a fresh Pool (no worker_id) so auto_reap_stale doesn't skip on owner.
+    reaper = Pool(tmp_path / "p")
+    # threshold_s=0 to ensure any heartbeat-less owner would otherwise qualify.
+    results = reaper.auto_reap_stale(threshold_s=0.0, now=_time.time())
+    # Nothing should have been reaped — the claimed dir was empty after the race.
+    assert results == []
+    assert (pool.done_dir / "t1.yaml").exists()
+    assert not (pool.pending_dir / "t1.yaml").exists()
+    assert pool.status() == {"pending": 0, "claimed": 0, "done": 1, "failed": 0}
