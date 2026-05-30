@@ -151,3 +151,19 @@ gated on the hydrogenation cool+prod dogfood:
 - 2026-05-30 — Thrust 13 (doc-staleness sweep) subordinate spawned. Lane: `README.md`, `START_HERE.md`, `docs/{ARCHITECTURE,DEPLOYMENT,AGENT_GUIDE}.md`, `validation/RESULTS.md` + small Pool.diagnose change to catch PriorSchemaError internally. T12 already touched AGENT_GUIDE's DAG section narrowly — T13 owns the rest of the sweep with explicit instruction to leave the DAG grace note in place.
 - 2026-05-30 — Thrust 13 returned: 214 tests (+2), ruff clean, all 6 P1 doc-staleness items + Pool.diagnose internal catch + cli text-format error path all done. Grep audit: 4 remaining hits all intentional (Planned section header, ccm Phase-2 marker, historical Phase-0 don't-build list, historical Cycle-1 narrative). Committed `23d5cc4` → pushed.
 - 2026-05-30 — Cycle 2 final convergence audit spawned. Lighter brief (one focused auditor): verify rename-first P0 fix holds across all three call sites; verify the doc-staleness sweep is clean; broad P0/P1 sweep. CONVERGED (0 P0/P1) closes Cycle 2 → morning summary surfaces to user per ADL + orchestration skill.
+- 2026-05-30 — Cycle 2 final convergence audit returned: all 6 P1/P2 fix items verified correct + complete (rename-first across all 3 sites, yaml passthrough, artifacts task-env-only, DAG grace + prune, Pool.diagnose internal catch, cli text-format). One **new** P1 caught: START_HERE.md "Don't build" list had asymmetric strike-through — T13 struck only heartbeats, leaving DAG/Priors/Artifact-validation as `❌ ... Phase 1/2`. Orchestrator fixed directly (faster than spawning a 6-line subordinate per orchestration skill guidance). Strike-through now symmetric across all 4 shipped Cycle-2 rows; section preamble reframed as historical Phase-0 contract with pointer to current-state docs. Committed `f1692fb`.
+- 2026-05-30 — **Cycle 2 CONVERGED.** 0 P0, 0 P1. 214 tests pass, ruff clean. Autonomous window ending; morning summary surfaces to user.
+
+## Closing snapshot (cycle boundary)
+
+**Commits this window:** `1e2498c` (T8 artifact validation) → `68aad95` (T9 DAG) → `335b3ed` (T10 heartbeats + auto reap-stale) → `bb264ae` (T11 priors + diagnose) → `64af868` (T12 P0 rename-first + 3 P1 code) → `23d5cc4` (T13 doc-staleness sweep + Pool.diagnose catch + cli polish) → `f1692fb` (START_HERE symmetry). All on `phase0-mvp`, all pushed.
+
+**Test progression:** 141 → 159 (+T8) → 165 (+T9) → 174 (+T10) → 203 (+T11) → 212 (+T12) → 214 (+T13). All ruff-clean.
+
+**Cycle 2 P0/P1 trajectory:** initial audit found 1 P0 + 9 P1; T12 cleared the P0 + 3 code P1s; T13 cleared 5 doc P1s + 1 Pool.diagnose P1; final convergence audit caught 1 residual symmetry P1, orchestrator closed directly. 0 P0 / 0 P1 outstanding.
+
+**Locked safety conventions held:** no Phase-2 anti-features touched (no CCM, no multi-GPU type accounting, no cost-aware routing); no destructive git ops; no Anthropic API; subjob remains stdlib-only at runtime. The "do NOT relax acceptance criteria" gate held — even the convergence auditor flagged a P1 we acted on.
+
+**Outstanding (cycle backlog, all P2/P3):** small `worker_id` collision space (16-bit random suffix); no priors `match` key for `artifact_validation_failed` (catch-all priors still catch it); ARCHITECTURE worker pseudocode references three non-existent Pool methods (sketch is fenced with a disclaimer); a handful of interaction-test coverage gaps (priors.yaml mid-edit, heartbeat write race, auto-reap + dispatch same cycle). None block real use.
+
+**Genuinely deferred (need product decisions, NOT defects):** multi-GPU type accounting (needs heterogeneous-GPU workload); CCM / Vast.ai backend (needs spot-resilience use case); cost-aware routing (needs multi-backend cost data); `pool.read_artifact` one-call read+verify helper; auto-applied priors mitigations.
