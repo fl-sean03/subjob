@@ -118,3 +118,5 @@ gated on the hydrogenation cool+prod dogfood:
 - 2026-05-30 — Session opened. Authority grant echoed. Skill loaded.
 - 2026-05-30 — Pre-existing tasks #53–57 created for Thrusts 8–11 + Cycle 2 re-audit.
 - 2026-05-30 — Thrust 8 (artifact validation) subordinate `a4641c57a2d77f941` spawned BEFORE this session log existed; brief is the version captured in that Agent call. Future briefs (Thrusts 9–11 + audits) will follow the eleven-section skeleton from the skill, including this skill's path in required reading.
+- 2026-05-30 — Thrust 8 returned: 159 tests pass, ruff clean. Diff verified by orchestrator (worker happy-path gate is correct; shutdown/release paths untouched). Committed `1e2498c` → pushed.
+- 2026-05-30 — Thrust 9 (DAG enforcement) subordinate `a5ac031a0b4d115e1` spawned with the full eleven-section brief. Lane: `src/subjob/worker/worker.py`, `docs/AGENT_GUIDE.md`, `tests/test_worker.py`. Required reading includes the orchestration skill so the subordinate auto-loads it if it spawns further subordinates (brief explicitly says it should NOT need to).
