@@ -380,6 +380,127 @@ def test_pool_claim_no_stamp_when_worker_id_none(tmp_path):
     assert not any("claimed_by" in a for a in t.attempts)
 
 
+def _fail_a_task(pool, task_id, command="exit 7", stderr_text=""):
+    """Drain a single failing task through an in-process worker.
+
+    If ``stderr_text`` is given, append it to ``logs/<id>.err`` after the
+    worker finishes so the diagnose stderr_regex path has something to match.
+    """
+    from subjob.worker.worker import Capabilities, Worker
+
+    pool.submit(Task(id=task_id, command=command))
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    if stderr_text:
+        with open(pool.logs_dir / f"{task_id}.err", "a") as f:
+            f.write(stderr_text)
+
+
+def test_diagnose_unknown_task_returns_error_field(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    result = pool.diagnose("not_a_task")
+    assert result["task_id"] == "not_a_task"
+    assert result["error"] == "task not in failed/"
+    assert result["verdict"] == "unknown"
+    assert result["matches"] == []
+
+
+def test_diagnose_failed_task_no_priors_yaml(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_a_task(pool, "boom", command="exit 7")
+    result = pool.diagnose("boom")
+    assert result["task_id"] == "boom"
+    assert result["exit_code"] == 7
+    assert result["matches"] == []
+    assert result["verdict"] == "unknown"
+    assert result["suggested_fix"] is None
+
+
+def test_diagnose_matches_by_exit_code(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_a_task(pool, "boom", command="exit 7")
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n"
+        "  - id: exit-7-known\n"
+        "    verdict: needs-retry\n"
+        "    suggested_fix: |\n"
+        "      Bump retry count and re-submit.\n"
+        "    match:\n"
+        "      exit_code: 7\n"
+    )
+    result = pool.diagnose("boom")
+    assert result["verdict"] == "needs-retry"
+    assert result["suggested_fix"].startswith("Bump retry")
+    assert len(result["matches"]) == 1
+    assert result["matches"][0]["id"] == "exit-7-known"
+
+
+def test_diagnose_matches_by_stderr_regex(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_a_task(
+        pool,
+        "boom",
+        command="exit 1",
+        stderr_text="\nFATAL ERROR: cannot open restart file\n",
+    )
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n"
+        "  - id: namd-restart\n"
+        "    verdict: needs-mitigation\n"
+        '    suggested_fix: "Re-stage restart files."\n'
+        "    match:\n"
+        '      stderr_regex: "FATAL ERROR.*restart"\n'
+    )
+    result = pool.diagnose("boom")
+    assert result["verdict"] == "needs-mitigation"
+    assert len(result["matches"]) == 1
+    assert result["matches"][0]["id"] == "namd-restart"
+    assert "FATAL ERROR" in result["stderr_tail"]
+
+
+def test_diagnose_no_match_returns_unknown(tmp_path):
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_a_task(pool, "boom", command="exit 7")
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n"
+        "  - id: only-exit-99\n"
+        "    verdict: special\n"
+        "    match:\n"
+        "      exit_code: 99\n"
+    )
+    result = pool.diagnose("boom")
+    assert result["matches"] == []
+    assert result["verdict"] == "unknown"
+    assert result["suggested_fix"] is None
+
+
+def test_diagnose_priors_cached_across_calls(tmp_path):
+    """_load_priors_once must only read priors.yaml once per Pool instance."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_a_task(pool, "a", command="exit 1")
+    _fail_a_task(pool, "b", command="exit 1")
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n  - id: catch\n    verdict: x\n"
+    )
+    # First call populates the cache
+    pool.diagnose("a")
+    assert pool._priors is not None
+    first_priors = pool._priors
+    pool.diagnose("b")
+    # Same list object — not reloaded
+    assert pool._priors is first_priors
+
+
 def test_read_journal_skips_truncated_line_between_valid_events(tmp_path):
     pool = Pool(tmp_path / "p")
     pool.init()

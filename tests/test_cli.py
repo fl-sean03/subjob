@@ -406,6 +406,88 @@ def test_reap_stale_auto_falls_back_to_mtime_for_legacy_claims(tmp_path):
     assert pool.status()["pending"] == 1
 
 
+def test_diagnose_single_task_with_matching_prior(tmp_path):
+    """`subjob diagnose --task-id` JSON includes verdict and matches."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_one_task(pool, "boom", "exit 7")
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n"
+        "  - id: exit-7-known\n"
+        "    verdict: needs-retry\n"
+        "    suggested_fix: |\n"
+        "      Bump retry and resubmit.\n"
+        "    match:\n"
+        "      exit_code: 7\n"
+    )
+    r = _run(["diagnose", "--pool", str(tmp_path / "p"), "--task-id", "boom"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["task_id"] == "boom"
+    assert parsed["verdict"] == "needs-retry"
+    assert len(parsed["matches"]) == 1
+    assert parsed["matches"][0]["id"] == "exit-7-known"
+
+
+def test_diagnose_batch_lists_all_failures(tmp_path):
+    """`subjob diagnose` (no --task-id) returns a count and per-task verdicts."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_one_task(pool, "a", "exit 1")
+    _fail_one_task(pool, "b", "exit 1")
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n"
+        "  - id: any-exit-1\n"
+        "    verdict: known-failure\n"
+        "    suggested_fix: |\n"
+        "      Check inputs.\n"
+        "    match:\n"
+        "      exit_code: 1\n"
+    )
+    r = _run(["diagnose", "--pool", str(tmp_path / "p")])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["count"] == 2
+    ids = sorted(d["task_id"] for d in parsed["diagnoses"])
+    assert ids == ["a", "b"]
+    assert all(d["verdict"] == "known-failure" for d in parsed["diagnoses"])
+
+
+def test_diagnose_no_priors_yaml_does_not_error(tmp_path):
+    """Missing priors.yaml is not an error: verdict is "unknown" with no matches."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_one_task(pool, "boom", "exit 7")
+    # No priors.yaml written.
+    r = _run(["diagnose", "--pool", str(tmp_path / "p"), "--task-id", "boom"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    assert parsed["task_id"] == "boom"
+    assert parsed["verdict"] == "unknown"
+    assert parsed["matches"] == []
+    assert parsed["suggested_fix"] is None
+    # Batch mode on the same pool also returns cleanly
+    r2 = _run(["diagnose", "--pool", str(tmp_path / "p")])
+    assert r2.returncode == 0, r2.stderr
+    parsed2 = json.loads(r2.stdout)
+    assert parsed2["count"] == 1
+    assert parsed2["diagnoses"][0]["verdict"] == "unknown"
+
+
+def test_diagnose_malformed_priors_yaml_emits_error(tmp_path):
+    """Malformed priors.yaml surfaces a JSON error (not a traceback)."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    _fail_one_task(pool, "boom", "exit 7")
+    (pool.root / "priors.yaml").write_text(
+        "priors:\n  - verdict: missing-id\n"
+    )
+    r = _run(["diagnose", "--pool", str(tmp_path / "p"), "--task-id", "boom"])
+    assert r.returncode == 1
+    parsed = json.loads(r.stdout)
+    assert "id must be a non-empty string" in parsed["error"]
+
+
 def test_reap_stale_respects_threshold(tmp_path):
     import os
     pool = Pool(tmp_path / "p")

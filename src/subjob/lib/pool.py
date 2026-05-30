@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from subjob.lib.lock import atomic_move
+from subjob.lib.priors import Prior, load_priors, match_priors
 from subjob.lib.task import Task
 
 try:
@@ -73,6 +74,10 @@ class Pool:
         # per-poll cost from O(N reads) to O(N stat + changed-file reads).
         # See validation/PLAN.md F-001.
         self._pending_cache: dict[str, tuple[float, Task]] = {}
+        # Lazy-loaded priors catalog (see lib/priors.py). Loaded on first
+        # diagnose() call and reused across subsequent diagnoses in this
+        # process — a batch triage often calls diagnose() many times.
+        self._priors: list[Prior] | None = None
 
     # ----- lifecycle -----
 
@@ -161,6 +166,113 @@ class Pool:
 
     def read_task(self, state: str, task_id: str) -> Task:
         return Task.read(self.root / state / f"{task_id}.yaml")
+
+    # ----- diagnose -----
+
+    def _load_priors_once(self) -> list[Prior]:
+        """Load the per-pool priors.yaml on first use; cache for the Pool lifetime."""
+        if self._priors is None:
+            self._priors = load_priors(self.root / "priors.yaml")
+        return self._priors
+
+    def diagnose(self, task_id: str) -> dict[str, Any]:
+        """Run the priors catalog against a failed task; return a verdict dict.
+
+        Reads ``failed/<task_id>.yaml`` and ``logs/<task_id>.err``, extracts
+        ``exit_code`` / ``walltime_killed`` / error string from the last
+        attempt, and runs ``priors.yaml`` (if present) against that signal.
+
+        Return shape (the contract; do not widen unilaterally):
+          ``task_id``: str — echoed back
+          ``error``: str — set ONLY when the task isn't in failed/
+          ``exit_code``: int | None — from the last attempt, if recorded
+          ``walltime_killed``: bool | None — from the last attempt
+          ``stderr_tail``: str — last ~16 KB of logs/<id>.err (or "")
+          ``matches``: list[dict] — every matching prior as ``to_dict``
+          ``verdict``: str — best-match (first) verdict, or "unknown"
+          ``suggested_fix``: str | None — best-match suggested_fix, or None
+          ``priors_apply``: list[str] — the task's declared ``priors_apply``
+            field (parsed but inert today; surfaced for the operator).
+
+        Phase-1 scope: advisory only. The ``auto_apply`` field on matched
+        priors is surfaced in ``matches`` but the worker does not act on it.
+        """
+        failed_path = self.failed_dir / f"{task_id}.yaml"
+        if not failed_path.exists():
+            return {
+                "task_id": task_id,
+                "error": "task not in failed/",
+                "verdict": "unknown",
+                "matches": [],
+                "suggested_fix": None,
+                "exit_code": None,
+                "walltime_killed": None,
+                "stderr_tail": "",
+                "priors_apply": [],
+            }
+        try:
+            task = Task.read(failed_path)
+        except Exception as e:
+            return {
+                "task_id": task_id,
+                "error": f"unreadable failed task YAML: {e}",
+                "verdict": "unknown",
+                "matches": [],
+                "suggested_fix": None,
+                "exit_code": None,
+                "walltime_killed": None,
+                "stderr_tail": "",
+                "priors_apply": [],
+            }
+        last = task.attempts[-1] if task.attempts else {}
+        exit_code = last.get("exit_code")
+        if exit_code is not None and not isinstance(exit_code, int):
+            # Defensive: some attempt payloads may carry exit_code as another
+            # scalar; coerce when possible, otherwise leave as-is.
+            try:
+                exit_code = int(exit_code)
+            except (TypeError, ValueError):
+                exit_code = None
+        walltime_killed = last.get("walltime_killed")
+        if walltime_killed is not None and not isinstance(walltime_killed, bool):
+            walltime_killed = bool(walltime_killed)
+        stderr_tail = self._tail_err(task_id, max_bytes=16 * 1024)
+        priors = self._load_priors_once()
+        matches = match_priors(
+            priors,
+            exit_code=exit_code,
+            walltime_killed=walltime_killed,
+            stderr_tail=stderr_tail,
+        )
+        if matches:
+            verdict = matches[0].verdict or "unknown"
+            suggested_fix = matches[0].suggested_fix or None
+        else:
+            verdict = "unknown"
+            suggested_fix = None
+        return {
+            "task_id": task_id,
+            "exit_code": exit_code,
+            "walltime_killed": walltime_killed,
+            "stderr_tail": stderr_tail,
+            "matches": [m.to_dict() for m in matches],
+            "verdict": verdict,
+            "suggested_fix": suggested_fix,
+            "priors_apply": list(task.priors_apply),
+        }
+
+    def _tail_err(self, task_id: str, *, max_bytes: int) -> str:
+        """Return the last ``max_bytes`` of ``logs/<task_id>.err`` (or "")."""
+        path = self.logs_dir / f"{task_id}.err"
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+                data = f.read()
+        except OSError:
+            return ""
+        return data.decode("utf-8", errors="replace")
 
     # ----- claim / release / commit -----
 

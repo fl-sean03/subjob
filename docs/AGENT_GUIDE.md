@@ -78,12 +78,22 @@ subjob failures --pool /scratch/.../pool
 
 # Drill into one failed task (adds command + a longer stderr tail)
 subjob failures --pool /scratch/.../pool --task-id snap_005
+
+# Classify failures against the pool's priors.yaml (see § Diagnose below)
+subjob diagnose --pool /scratch/.../pool
+# → {"diagnoses": [{"task_id": "snap_005", "verdict": "needs-mitigation", ...}], "count": 1}
+subjob diagnose --pool /scratch/.../pool --task-id snap_005
+# → full verdict dict including matches[] and stderr_tail
 ```
 
 ## What an agent should do when a task fails
 
 1. Triage with the CLI: `subjob failures --pool $POOL` (all failures) or
    `subjob failures --pool $POOL --task-id $TID` (one task, with command + longer stderr tail).
+1.5. Run `subjob diagnose --pool $POOL --task-id $TID` (or batch-mode without
+   `--task-id`). If a prior matches, follow its `suggested_fix`. The pool's
+   `priors.yaml` catalog is optional — if missing, diagnose returns
+   `verdict: "unknown"` without erroring. See the Diagnose section below.
 2. For programmatic access from Python, list and read failed tasks directly:
    `pool.list_state("failed")` returns the failed task paths, and
    `pool.read_task("failed", id)` loads a `Task` whose `.attempts[-1]` holds the
@@ -196,14 +206,87 @@ success-marker outcome (`success_marker_path`, `success_marker_found`,
 --task-id <id>` surfaces these fields directly. When validation succeeds, the
 same detail is attached under `artifacts` on the done attempt.
 
+## Diagnose: classifying failures
+
+subjob ships a tiny per-pool priors framework so a fleet operator can capture
+"failure mode X means do Y" once and have every subsequent triage benefit. The
+catalog lives at `<pool>/priors.yaml` and is **optional** — diagnose works
+without it (every verdict comes back `"unknown"`).
+
+### priors.yaml schema
+
+```yaml
+# <pool>/priors.yaml — optional, per-pool failure catalog.
+priors:
+  - id: namd-restart-cwd-mismatch         # short stable id (required)
+    description: |
+      NAMD restart files written to old cwd; new run can't find them.
+    match:                                # ALL conditions must hold
+      exit_code: 1                        # optional; exact int match
+      stderr_regex: "FATAL ERROR.*cannot open.*restart"
+                                          # optional; Python re.search()
+      walltime_killed: false              # optional; bool exact match
+    verdict: needs-mitigation             # required string (human-friendly)
+    suggested_fix: |
+      Re-stage the .restart.coor / .restart.vel files into the task's
+      workdir, or set workdir to the original prep directory.
+    auto_apply: false                     # parsed; NOT honored in Phase 1
+```
+
+Empty / omitted `match` → **catch-all** that matches every failure (useful as
+a final "unknown failure: please review" entry). Priors order is priority
+order: the first match wins for `verdict` / `suggested_fix`, but every match
+is listed in the result's `matches` array.
+
+### Phase 1 scope: advisory only
+
+`auto_apply` and the Task field `priors_apply` are **parsed but inert**. The
+worker does not act on them yet — diagnose just surfaces the matched prior so
+a human (or an agent) decides what to do. Automatic mitigations (the worker
+honoring `priors_apply`) stay deferred to a later thrust.
+
+### CLI
+
+```bash
+# Batch: one-line verdict per failed task
+subjob diagnose --pool $POOL
+# → {"diagnoses": [{"task_id": "snap_005", "verdict": "needs-mitigation",
+#                   "suggested_fix": "Re-stage the .restart.coor ..."}],
+#    "count": 1}
+
+# Single task: full verdict dict
+subjob diagnose --pool $POOL --task-id snap_005
+# → {"task_id": "snap_005", "exit_code": 1, "walltime_killed": false,
+#    "stderr_tail": "...", "matches": [{...prior...}],
+#    "verdict": "needs-mitigation", "suggested_fix": "...",
+#    "priors_apply": []}
+```
+
+### Python
+
+```python
+from subjob import Pool
+pool = Pool("/scratch/.../my-pool")
+result = pool.diagnose("snap_005")
+if result["matches"]:
+    print(f"verdict={result['verdict']}: {result['suggested_fix']}")
+else:
+    print(f"no prior matched; stderr tail:\n{result['stderr_tail']}")
+```
+
+`pool.diagnose(task_id)` returns the same dict the CLI emits. If the task
+isn't in `failed/`, the dict has `error: "task not in failed/"` and
+`verdict: "unknown"` (no exception).
+
 ## Not yet implemented (Phase 1 / Phase 2)
 
 These are **parsed but not acted on**, or not present at all. Don't rely on
 them yet:
 
-- `pool.diagnose(task_id)` — *Phase 1* — classifier verdict + prior-match +
-  suggested fix. Until then, use `subjob failures` / `pool.read_task("failed",
-  id)` for triage (see "What an agent should do when a task fails" above).
 - `pool.read_artifact(task_id, name)` — *Phase 1* — validated read of a task's
   declared artifact. Until then, read the result file your task wrote directly
   (you control the command and output path).
+- Auto-applied priors mitigations — *Phase 1+* — `auto_apply: true` on a
+  prior and the `priors_apply` field on a Task are parsed but the worker does
+  not act on them. Use `subjob diagnose` to surface the suggested fix and
+  apply it manually.

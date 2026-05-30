@@ -129,6 +129,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_failures.set_defaults(func=cmd_failures)
 
+    p_diag = sub.add_parser(
+        "diagnose",
+        help=(
+            "Classify failed tasks against the pool's priors.yaml catalog "
+            "(advisory; complements `failures`)"
+        ),
+    )
+    p_diag.add_argument("--pool", required=True)
+    p_diag.add_argument(
+        "--task-id",
+        default=None,
+        help=(
+            "Diagnose a single failed task; omit to diagnose every failed "
+            "task in the pool."
+        ),
+    )
+    p_diag.set_defaults(func=cmd_diagnose)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -413,6 +431,46 @@ def cmd_failures(args) -> int:
         items.append(entry)
     _emit(args.format, {"failures": items, "count": len(items)})
     return 0
+
+
+def cmd_diagnose(args) -> int:
+    """Run the priors catalog over failed task(s); print verdict + matches.
+
+    Two modes:
+      - ``--task-id``: diagnose one task; print the full verdict dict.
+      - omitted: diagnose every failed task; print a list of one-line
+        verdicts plus a count.
+
+    Missing priors.yaml is NOT an error — the verdict is just "unknown"
+    with no matches.
+    """
+    from subjob.lib.priors import PriorSchemaError
+
+    pool = Pool(args.pool)
+    try:
+        if args.task_id:
+            result = pool.diagnose(args.task_id)
+            _emit(args.format, result)
+            return 0
+        # Batch mode: one-line entry per failed task.
+        items = []
+        for p in pool.list_state("failed"):
+            r = pool.diagnose(p.stem)
+            fix = r.get("suggested_fix") or ""
+            # Collapse to a single line for the batch summary.
+            fix_line = fix.strip().splitlines()[0] if fix.strip() else ""
+            items.append(
+                {
+                    "task_id": r["task_id"],
+                    "verdict": r["verdict"],
+                    "suggested_fix": fix_line,
+                }
+            )
+        _emit(args.format, {"diagnoses": items, "count": len(items)})
+        return 0
+    except PriorSchemaError as e:
+        _emit(args.format, {"error": str(e)})
+        return 1
 
 
 def _tail_bytes(path: Path, n: int) -> str:
