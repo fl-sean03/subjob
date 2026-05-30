@@ -27,6 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
+from subjob.lib.artifacts import validate_artifacts
 from subjob.lib.pool import ClaimedTask, Pool
 from subjob.lib.task import Task
 from subjob.worker.runner import ExitResult, run_task
@@ -266,7 +267,22 @@ class Worker:
             self._running_procs.pop(claim.task.id, None)
 
         if result.succeeded:
-            self.pool.commit_done(claim, result.to_dict())
+            # Exit code 0 alone isn't enough: validate any declared artifacts
+            # before recording success. A command that exits clean without
+            # writing its outputs is a real failure, not a silent wrong result.
+            ok, detail = validate_artifacts(
+                claim.task.artifacts,
+                env=claim.task.env,
+                workdir=claim.task.workdir or None,
+            )
+            payload = result.to_dict()
+            if ok:
+                payload["artifacts"] = detail
+                self.pool.commit_done(claim, payload)
+            else:
+                payload["artifact_validation_failed"] = True
+                payload["artifact_detail"] = detail
+                self.pool.commit_failed(claim, payload)
         elif self._shutdown:
             # We were told to stop and the task didn't finish cleanly — release
             # it (back to pending) so another worker retries, rather than

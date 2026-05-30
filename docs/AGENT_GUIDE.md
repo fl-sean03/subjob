@@ -163,6 +163,35 @@ pool.submit_batch([Task(id=f"sample-{j}", command=...) for j in next_samples])
 - **Walltime is per-task** — if a task hits its declared walltime, worker kills it. Don't set generous values "just in case"; tighter is better.
 - **Workers exit at allocation walltime** — unfinished claims get released and re-queued. Plan for this if your worker allocation is 7 days but tasks are 12 hr.
 
+## Artifact validation
+
+subjob validates a task's declared `artifacts` after exit 0. A command that
+exits 0 without writing its declared outputs is recorded as a **real failure**,
+not a silent wrong result.
+
+Two kinds of artifacts are checked:
+
+- `artifacts.expect`: list of paths that must exist after the command finishes.
+- `artifacts.success_marker`: `{file, contains}` — the file must exist AND
+  contain the given substring. (`contains` is optional; omit it to require only
+  that the file exists.)
+
+Path resolution:
+
+- `$VAR` and `${VAR}` are expanded against the task's `env` dict (NOT the
+  worker process's environ).
+- `~` is expanded against `env["HOME"]` if set, else the process's `HOME`.
+- Relative paths resolve against the task's `workdir` (or the worker's cwd if
+  the task declares none).
+
+When validation fails, the attempt recorded under `failed/` carries
+`artifact_validation_failed: True` plus an `artifact_detail` dict containing
+the resolved paths checked (`expect_checked`), any `missing_expect`, and the
+success-marker outcome (`success_marker_path`, `success_marker_found`,
+`success_marker_contains` / `success_marker_missing`). `subjob failures
+--task-id <id>` surfaces these fields directly. When validation succeeds, the
+same detail is attached under `artifacts` on the done attempt.
+
 ## Not yet implemented (Phase 1 / Phase 2)
 
 These are **parsed but not acted on**, or not present at all. Don't rely on
@@ -179,5 +208,3 @@ them yet:
 - `pool.read_artifact(task_id, name)` — *Phase 1* — validated read of a task's
   declared artifact. Until then, read the result file your task wrote directly
   (you control the command and output path).
-- `artifacts={...}` on a Task is parsed but **not validated** (Phase 1) — a
-  task is "done" on exit code 0, not on artifact presence.

@@ -297,6 +297,108 @@ def test_worker_walltime_expiry_releases_inflight_task(tmp_path):
     assert "task_released" in types
 
 
+def test_worker_fails_task_when_expect_artifact_missing(tmp_path):
+    """A task that exits 0 but doesn't produce its declared expect file must
+    land in failed/ with artifact_validation_failed: True."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    pool.submit(
+        Task(
+            id="ghost",
+            command="exit 0",  # exits clean but writes nothing
+            env={"SNAP_DIR": str(snap)},
+            artifacts={"expect": ["$SNAP_DIR/simulation.dcd"]},
+        )
+    )
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    s = pool.status()
+    assert s["failed"] == 1, s
+    assert s["done"] == 0, s
+    failed = pool.read_task("failed", "ghost")
+    last = failed.attempts[-1]
+    assert last.get("artifact_validation_failed") is True
+    detail = last.get("artifact_detail") or {}
+    assert detail.get("missing_expect")
+    assert detail["missing_expect"][0].endswith("simulation.dcd")
+
+
+def test_worker_passes_task_when_expect_artifact_present(tmp_path):
+    """A task that writes its declared expect file then exits 0 lands in done/."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    snap = tmp_path / "snap2"
+    snap.mkdir()
+    pool.submit(
+        Task(
+            id="real",
+            command=f"echo frames > {snap}/simulation.dcd",
+            env={"SNAP_DIR": str(snap)},
+            artifacts={"expect": ["$SNAP_DIR/simulation.dcd"]},
+        )
+    )
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    s = pool.status()
+    assert s["done"] == 1, s
+    assert s["failed"] == 0, s
+    done = pool.read_task("done", "real")
+    last = done.attempts[-1]
+    assert "artifacts" in last
+    assert "artifact_validation_failed" not in last
+
+
+def test_worker_success_marker_substring_must_match(tmp_path):
+    """Exit 0 + expect file present, but success_marker substring absent → failed."""
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    snap = tmp_path / "snap3"
+    snap.mkdir()
+    # Write a run.log that DOES NOT contain the required marker.
+    cmd = (
+        f"echo frames > {snap}/simulation.dcd && "
+        f"echo 'starting up' > {snap}/run.log"
+    )
+    pool.submit(
+        Task(
+            id="halfway",
+            command=cmd,
+            env={"SNAP_DIR": str(snap)},
+            artifacts={
+                "expect": ["$SNAP_DIR/simulation.dcd"],
+                "success_marker": {
+                    "file": "$SNAP_DIR/run.log",
+                    "contains": "PRODUCTION COMPLETE",
+                },
+            },
+        )
+    )
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    s = pool.status()
+    assert s["failed"] == 1, s
+    failed = pool.read_task("failed", "halfway")
+    last = failed.attempts[-1]
+    assert last.get("artifact_validation_failed") is True
+    detail = last.get("artifact_detail") or {}
+    assert detail.get("success_marker_found") is False
+    assert detail.get("success_marker_contains") == "PRODUCTION COMPLETE"
+
+
 def test_worker_sigterm_releases_inflight_task(tmp_path):
     """SIGTERM to a worker mid-task must release the claim (not fail it) and
     not hang on the in-flight subprocess. Models SLURM preemption."""

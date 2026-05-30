@@ -145,6 +145,42 @@ def test_failures_single_task_includes_command(tmp_path):
     assert entry["exit_code"] == 7
 
 
+def test_failures_surfaces_artifact_detail(tmp_path):
+    """A task that exits 0 but misses a declared artifact lands in failed/,
+    and `subjob failures --task-id` JSON must include `artifact_detail`."""
+    from subjob.worker.worker import Capabilities, Worker
+
+    pool = Pool(tmp_path / "p")
+    pool.init()
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    pool.submit(
+        Task(
+            id="missing-out",
+            command="exit 0",
+            env={"SNAP_DIR": str(snap)},
+            artifacts={"expect": ["$SNAP_DIR/simulation.dcd"]},
+        )
+    )
+    Worker(
+        pool,
+        Capabilities(cores=1, host="t"),
+        poll_interval=0.05,
+        idle_timeout_s=0.5,
+    ).run()
+    assert pool.status()["failed"] == 1
+
+    r = _run(["failures", "--pool", str(tmp_path / "p"), "--task-id", "missing-out"])
+    assert r.returncode == 0, r.stderr
+    parsed = json.loads(r.stdout)
+    entry = parsed["failures"][0]
+    assert entry["task_id"] == "missing-out"
+    assert entry["artifact_validation_failed"] is True
+    detail = entry["artifact_detail"]
+    assert detail["missing_expect"]
+    assert detail["missing_expect"][0].endswith("simulation.dcd")
+
+
 def test_reap_stale_to_failed_marks_and_emits(tmp_path):
     import os
     import time

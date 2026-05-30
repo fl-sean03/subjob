@@ -314,6 +314,12 @@ def cmd_failures(args) -> int:
             "error": last.get("error"),
             "stderr_tail": _tail_bytes(err_path, tail_bytes),
         }
+        # Surface artifact-validation failures in triage so the operator sees
+        # "command exited 0 but didn't produce $SNAP_DIR/run.log" rather than
+        # a confusing exit_code: 0 with no obvious cause.
+        if last.get("artifact_validation_failed"):
+            entry["artifact_validation_failed"] = True
+            entry["artifact_detail"] = last.get("artifact_detail")
         if args.task_id:
             entry["command"] = t.command
         items.append(entry)
